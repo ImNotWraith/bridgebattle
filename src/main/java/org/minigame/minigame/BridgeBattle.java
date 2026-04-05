@@ -16,6 +16,7 @@ import java.util.*;
 public class BridgeBattle extends JavaPlugin {
 
     private static BridgeBattle instance;
+    private BridgeBattleGUI gameMenu;
 
     // Game states
     public enum GameState {
@@ -51,6 +52,10 @@ public class BridgeBattle extends JavaPlugin {
     private Location bridgeZoneMin;
     private Location bridgeZoneMax;
 
+    // Chest Locations
+    private List<Location> chestLocations = new ArrayList<>();
+    private Map<Location, Team> capturedChests = new HashMap<>();
+
     @Override
     public void onEnable() {
         instance = this;
@@ -58,10 +63,16 @@ public class BridgeBattle extends JavaPlugin {
         loadSpawns();
         loadBridgeZone();
 
-        // Register events
-        getServer().getPluginManager().registerEvents(new GameListener(), this);
+        this.gameMenu = new BridgeBattleGUI(this);
+        getServer().getPluginManager().registerEvents(this.gameMenu, this);
 
-        getLogger().info(ChatColor.GREEN + "BridgeBattle enabled!");
+        getServer().getPluginManager().registerEvents(new GameListener(), this);
+        getLogger().info(ChatColor.GREEN + "BridgeBattle enabled with GUI!");
+    }
+
+    // Helper to open the menu
+    public void openGameMenu(Player player) {
+        player.openInventory(gameMenu.getInventory());
     }
 
     @Override
@@ -114,6 +125,22 @@ public class BridgeBattle extends JavaPlugin {
                 (float) config.getDouble("spawns." + name + ".pitch"));
     }
 
+    private void loadChests() {
+        chestLocations.clear();
+        capturedChests.clear();
+        FileConfiguration config = getConfig();
+        for (int i = 1; i <= 3; i++) {
+            if (config.contains("chests.c" + i)) {
+                World w = Bukkit.getWorld(config.getString("chests.c" + i + ".world"));
+                Location loc = new Location(w,
+                        config.getDouble("chests.c" + i + ".x"),
+                        config.getDouble("chests.c" + i + ".y"),
+                        config.getDouble("chests.c" + i + ".z"));
+                chestLocations.add(loc);
+            }
+        }
+    }
+
     private void saveSpawn(String name, Location loc) {
         FileConfiguration config = getConfig();
         config.set("spawns." + name + ".world", loc.getWorld().getName());
@@ -123,6 +150,21 @@ public class BridgeBattle extends JavaPlugin {
         config.set("spawns." + name + ".yaw", (double) loc.getYaw());
         config.set("spawns." + name + ".pitch", (double) loc.getPitch());
         saveConfig();
+    }
+
+    // Helper to set a chest location
+    public void setGameChest(int index, Location loc) {
+        if (index < 1 || index > 3) return;
+
+        FileConfiguration config = getConfig();
+        config.set("chests.c" + index + ".world", loc.getWorld().getName());
+        config.set("chests.c" + index + ".x", loc.getBlockX());
+        config.set("chests.c" + index + ".y", loc.getBlockY());
+        config.set("chests.c" + index + ".z", loc.getBlockZ());
+        saveConfig();
+
+        // Refresh the list
+        loadChests();
     }
 
     public void setSpawn(String type, Location location) {
@@ -280,6 +322,70 @@ public class BridgeBattle extends JavaPlugin {
         if (total >= min) {
             startCountdown();
         }
+    }
+
+    // Returns the list of the 3 chest locations
+    public List<Location> getChestLocations() {
+        return chestLocations;
+    }
+
+    // Returns the map of which team has captured which chest
+    public Map<Location, Team> getCapturedChests() {
+        return capturedChests;
+    }
+
+    // Logic to check for a winner based on 2/3 chests
+    public void claimChest(Location loc, Team team) {
+        capturedChests.put(loc, team);
+
+        long redCount = capturedChests.values().stream().filter(t -> t == Team.RED).count();
+        long blueCount = capturedChests.values().stream().filter(t -> t == Team.BLUE).count();
+
+        if (redCount >= 2) {
+            winRound(Team.RED);
+        } else if (blueCount >= 2) {
+            winRound(Team.BLUE);
+        }
+    }
+
+    // ==================== CHEST CAPTURE =======================
+
+    // Add this to your BridgeBattle class
+    public void handleChestCapture(Location chestLoc, Player player) {
+        Team team = getPlayerTeam(player);
+        if (team == Team.NONE) return;
+
+        // Check if this chest was already captured this round
+        if (getCapturedChests().containsKey(chestLoc)) {
+            player.sendMessage(ChatColor.RED + "This chest has already been claimed!");
+            return;
+        }
+
+        // Capture the chest
+        getCapturedChests().put(chestLoc, team);
+
+        // Broadcast the capture
+        String teamName = (team == Team.RED) ? ChatColor.RED + "RED" : ChatColor.BLUE + "BLUE";
+        Bukkit.broadcastMessage(teamName + ChatColor.YELLOW + " has captured a chest! (" +
+                getTeamCapturedCount(team) + "/2 needed to win)");
+
+        // Visual Feedback
+        player.playSound(player.getLocation(), Sound.BLOCK_CHEST_OPEN, 1f, 1f);
+        player.sendTitle("", teamName + ChatColor.WHITE + " captured a point!", 10, 40, 10);
+
+        // Check if the team reached 2 points
+        if (getTeamCapturedCount(team) >= 2) {
+            winRound(team);
+        }
+    }
+
+    // Helper to count how many chests a specific team has
+    private int getTeamCapturedCount(Team team) {
+        int count = 0;
+        for (Team t : getCapturedChests().values()) {
+            if (t == team) count++;
+        }
+        return count;
     }
 
     // ==================== GAME START / COUNTDOWN ====================
@@ -598,6 +704,10 @@ public class BridgeBattle extends JavaPlugin {
             player.sendMessage(ChatColor.YELLOW + "Next round starting!");
         }
 
+        for (Location loc : chestLocations) {
+            loc.clone().add(0, 1, 0).getBlock().setType(Material.AIR);
+        }
+
         // Reset timer
         if (gameTimer != null) gameTimer.cancel();
         roundTimeLeft = getConfig().getInt("game.round-time-seconds", 180);
@@ -605,6 +715,12 @@ public class BridgeBattle extends JavaPlugin {
 
         // Update scoreboard
         updateScoreboard();
+        capturedChests.clear();
+
+        // Clear the capture data so chests can be opened again
+        getCapturedChests().clear();
+
+        Bukkit.broadcastMessage(ChatColor.GOLD + "The 3 chests have been reset! First to 2 wins!");
 
         // Brief countdown for next round
         new BukkitRunnable() {
@@ -672,20 +788,17 @@ public class BridgeBattle extends JavaPlugin {
 
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
-        if (!(sender instanceof Player)) {
-            sender.sendMessage("Only players can use this!");
-            return true;
-        }
-
+        if (!(sender instanceof Player)) return true;
         Player p = (Player) sender;
 
+        // Change /b to open the GUI instead of auto-joining
         if (command.getName().equalsIgnoreCase("b")) {
-            joinGame(p);
+            openGameMenu(p);
             return true;
         }
 
-        if (args.length == 0) {
-            sendHelp(p);
+        if (args.length > 0 && args[0].equalsIgnoreCase("join")) {
+            openGameMenu(p); // Open GUI when they type /bridge join
             return true;
         }
 
@@ -758,6 +871,43 @@ public class BridgeBattle extends JavaPlugin {
                 saveConfig();
                 loadBridgeZone();
                 break;
+
+            case "setchest":
+                if (!p.hasPermission("bridge.admin")) {
+                    p.sendMessage(ChatColor.RED + "No permission!");
+                    return true;
+                }
+
+                if (args.length < 2) {
+                    p.sendMessage(ChatColor.RED + "Usage: /bridge setchest <1|2|3>");
+                    return true;
+                }
+
+                try {
+                    int id = Integer.parseInt(args[1]);
+                    if (id < 1 || id > 3) {
+                        p.sendMessage(ChatColor.RED + "Use chest number 1, 2, or 3!");
+                        return true;
+                    }
+
+                    // Get the block the player is LOOKING at
+                    org.bukkit.block.Block targetBlock = p.getTargetBlockExact(5);
+
+                    if (targetBlock == null || targetBlock.getType() != Material.CHEST) {
+                        p.sendMessage(ChatColor.RED + "You must be looking at a Chest to set it!");
+                        return true;
+                    }
+
+                    Location loc = targetBlock.getLocation();
+                    setGameChest(id, loc); // This saves it to your config
+
+                    p.sendMessage(ChatColor.GOLD + "Successfully set " + ChatColor.YELLOW + "Game Chest #" + id);
+                    p.playSound(p.getLocation(), Sound.BLOCK_NOTE_BLOCK_CHIME, 1f, 2f);
+
+                } catch (NumberFormatException ex) {
+                    p.sendMessage(ChatColor.RED + "Invalid number!");
+                }
+                return true;
 
             case "top":
                 showTopKillers(p);

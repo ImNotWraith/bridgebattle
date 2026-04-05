@@ -59,50 +59,55 @@ public class GameListener implements Listener {
 
     @EventHandler
     public void onBlockPlace(BlockPlaceEvent event) {
-        BridgeBattle plugin = getPlugin();
+        BridgeBattle plugin = BridgeBattle.getInstance();
+        Player p = event.getPlayer();
 
-        // Only allow block placing during active game
+        // ADMINS BYPASS ALL RULES
+        if (p.hasPermission("bridge.admin") && p.getGameMode() == GameMode.CREATIVE) return;
+
+        // 1. Only allow placing during active game
         if (plugin.getGameState() != BridgeBattle.GameState.ACTIVE) {
             event.setCancelled(true);
-            event.getPlayer().sendMessage(ChatColor.RED + "Game not active!");
+            p.sendMessage(ChatColor.RED + "Game not active!");
             return;
         }
 
-        // Only allow white wool
+        // 2. Only allow white wool
         if (event.getBlock().getType() != Material.WHITE_WOOL) {
             event.setCancelled(true);
-            event.getPlayer().sendMessage(ChatColor.RED + "You can only place white wool!");
+            p.sendMessage(ChatColor.RED + "You can only place white wool!");
             return;
         }
 
-        // Check if in bridge zone (if set)
+        // 3. Check if in bridge zone
         if (!plugin.isInBridgeZone(event.getBlock().getLocation())) {
             event.setCancelled(true);
-            event.getPlayer().sendMessage(ChatColor.RED + "You can only place blocks in the bridge zone!");
+            p.sendMessage(ChatColor.RED + "You can only place blocks in the bridge zone!");
         }
     }
 
     @EventHandler
     public void onBlockBreak(BlockBreakEvent event) {
-        BridgeBattle plugin = getPlugin();
+        BridgeBattle plugin = BridgeBattle.getInstance();
+        Player p = event.getPlayer();
 
-        // Only allow block breaking during active game
+        // ADMINS BYPASS ALL RULES
+        if (p.hasPermission("bridge.admin") && p.getGameMode() == GameMode.CREATIVE) return;
+
         if (plugin.getGameState() != BridgeBattle.GameState.ACTIVE) {
             event.setCancelled(true);
             return;
         }
 
-        // Only allow breaking white wool
         if (event.getBlock().getType() != Material.WHITE_WOOL) {
             event.setCancelled(true);
-            event.getPlayer().sendMessage(ChatColor.RED + "You can only break white wool!");
+            p.sendMessage(ChatColor.RED + "You can only break white wool!");
             return;
         }
 
-        // Check if in bridge zone (if set)
         if (!plugin.isInBridgeZone(event.getBlock().getLocation())) {
             event.setCancelled(true);
-            event.getPlayer().sendMessage(ChatColor.RED + "You can only break blocks in the bridge zone!");
+            p.sendMessage(ChatColor.RED + "You can only break blocks in the bridge zone!");
         }
     }
 
@@ -208,6 +213,83 @@ public class GameListener implements Listener {
                 p.teleport(plugin.getSpawn("blue"));
                 p.sendMessage(ChatColor.YELLOW + "You fell into the void! Respawned at base!");
                 p.playSound(p.getLocation(), Sound.ENTITY_ENDERMAN_TELEPORT, 1.0f, 1.0f);
+            }
+        }
+    }
+
+    @EventHandler
+    public void onChestOpen(PlayerInteractEvent e) {
+
+        BridgeBattle plugin = getPlugin();
+        Player p = e.getPlayer();
+
+        if (e.getClickedBlock() == null || e.getClickedBlock().getType() != Material.CHEST) return;
+
+        // ALLOW ADMINS TO OPEN CHESTS AT ANY TIME
+        if (p.hasPermission("bridge.admin")) {
+            return; // Exit the listener and let the admin open the chest normally
+        }
+
+        if (plugin.getGameState() != BridgeBattle.GameState.ACTIVE) {
+            p.sendMessage(ChatColor.RED + "The game has not started yet!");
+            e.setCancelled(true);
+            return;
+        }
+
+        Location clickedLoc = e.getClickedBlock().getLocation();
+
+        // Check if this chest is one of the 3 game chests
+        for (Location chestLoc : plugin.getChestLocations()) {
+            if (chestLoc.equals(clickedLoc)) {
+                e.setCancelled(true); // Prevent them from actually seeing inside
+
+                BridgeBattle.Team team = plugin.getPlayerTeam(p);
+
+                if (team == BridgeBattle.Team.NONE) return;
+
+                // Check if team already owns it
+                if (plugin.getCapturedChests().get(clickedLoc) == team) {
+                    p.sendMessage(ChatColor.RED + "Your team already captured this chest!");
+                    return;
+                }
+
+                // Capture logic
+                plugin.claimChest(clickedLoc, team);
+                String teamColor = (team == BridgeBattle.Team.RED) ? "§cRED" : "§9BLUE";
+                Bukkit.broadcastMessage(teamColor + " §ehas captured a chest!");
+                p.playSound(p.getLocation(), Sound.BLOCK_CHEST_OPEN, 1f, 1f);
+
+                // Visual indicator: Change block above to team color?
+                clickedLoc.clone().add(0, 1, 0).getBlock().setType(
+                        team == BridgeBattle.Team.RED ? Material.RED_STAINED_GLASS : Material.BLUE_STAINED_GLASS
+                );
+            }
+        }
+    }
+
+    @EventHandler
+    public void onChestInteract(PlayerInteractEvent e) {
+        BridgeBattle plugin = BridgeBattle.getInstance();
+
+        // Only run if the game is ACTIVE
+        if (plugin.getGameState() != BridgeBattle.GameState.ACTIVE) return;
+
+        // Check if they clicked a block
+        if (e.getClickedBlock() == null || e.getClickedBlock().getType() != Material.CHEST) return;
+
+        Location clickedLoc = e.getClickedBlock().getLocation();
+        Player p = e.getPlayer();
+
+        // Check against the 3 saved chests
+        for (Location savedLoc : plugin.getChestLocations()) {
+            // Compare X, Y, Z directly to avoid decimal errors
+            if (savedLoc.getBlockX() == clickedLoc.getBlockX() &&
+                    savedLoc.getBlockY() == clickedLoc.getBlockY() &&
+                    savedLoc.getBlockZ() == clickedLoc.getBlockZ()) {
+
+                e.setCancelled(true); // Stop them from opening the chest UI
+                plugin.handleChestCapture(clickedLoc, p);
+                return;
             }
         }
     }
