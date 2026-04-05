@@ -5,6 +5,7 @@ import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.entity.Player;
+import org.bukkit.entity.Villager;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -56,16 +57,26 @@ public class BridgeBattle extends JavaPlugin {
     private List<Location> chestLocations = new ArrayList<>();
     private Map<Location, Team> capturedChests = new HashMap<>();
 
+    // Combat Items
+    private Map<UUID, Integer> bowLevels = new HashMap<>();
+
+    // Generators
+    private List<Location> diamondGens = new ArrayList<>();
+    private List<Location> emeraldGens = new ArrayList<>();
+    private List<Location> goldGens = new ArrayList<>();
+
     @Override
     public void onEnable() {
         instance = this;
         saveDefaultConfig();
         loadSpawns();
         loadBridgeZone();
+        loadGenerators();
 
         this.gameMenu = new BridgeBattleGUI(this);
         getServer().getPluginManager().registerEvents(this.gameMenu, this);
 
+        getServer().getPluginManager().registerEvents(new GameShop(), this);
         getServer().getPluginManager().registerEvents(new GameListener(), this);
         getLogger().info(ChatColor.GREEN + "BridgeBattle enabled with GUI!");
     }
@@ -77,6 +88,12 @@ public class BridgeBattle extends JavaPlugin {
 
     @Override
     public void onDisable() {
+        // Optional: Clean up items near generators on shutdown
+        for (Location loc : goldGens) {
+            loc.getWorld().getNearbyEntities(loc, 2, 2, 2).forEach(entity -> {
+                if (entity instanceof org.bukkit.entity.Item) entity.remove();
+            });
+        }
         getLogger().info(ChatColor.RED + "BridgeBattle disabled!");
     }
 
@@ -257,6 +274,7 @@ public class BridgeBattle extends JavaPlugin {
 
         playerTeam.remove(player);
         playerKills.remove(player);
+        bowLevels.remove(player.getUniqueId());
 
         // Clear inventory
         player.getInventory().clear();
@@ -324,6 +342,25 @@ public class BridgeBattle extends JavaPlugin {
         }
     }
 
+    private void loadGenerators() {
+        FileConfiguration config = getConfig();
+        goldGens = parseLocations(config.getStringList("generators.gold"));
+        diamondGens = parseLocations(config.getStringList("generators.diamond"));
+        emeraldGens = parseLocations(config.getStringList("generators.emerald"));
+    }
+
+    private List<Location> parseLocations(List<String> list) {
+        List<Location> locs = new ArrayList<>();
+        for (String s : list) {
+            String[] parts = s.split(",");
+            World w = Bukkit.getWorld(parts[0]);
+            if (w != null) {
+                locs.add(new Location(w, Double.parseDouble(parts[1]), Double.parseDouble(parts[2]), Double.parseDouble(parts[3])));
+            }
+        }
+        return locs;
+    }
+
     // Returns the list of the 3 chest locations
     public List<Location> getChestLocations() {
         return chestLocations;
@@ -388,7 +425,7 @@ public class BridgeBattle extends JavaPlugin {
         return count;
     }
 
-    // ==================== GAME START / COUNTDOWN ====================
+    // ==================== GAME START / COUNTDOWN / GENERATOR START ====================
 
     private void startCountdown() {
         gameState = GameState.COUNTDOWN;
@@ -454,6 +491,9 @@ public class BridgeBattle extends JavaPlugin {
             player.playSound(player.getLocation(), Sound.ENTITY_PLAYER_LEVELUP, 1.0f, 1.0f);
         }
 
+        // Starts the generator
+        startGenerators();
+
         // Start game timer
         startGameTimer();
 
@@ -462,11 +502,60 @@ public class BridgeBattle extends JavaPlugin {
             updateScoreboard(player);
         }
 
+        Bukkit.broadcastMessage(ChatColor.AQUA + "Generators have been activated!");
+
         // Broadcast start message
         Bukkit.broadcastMessage(ChatColor.GREEN + "═══════════════════════════════");
         Bukkit.broadcastMessage(ChatColor.GREEN + "  GAME STARTED!");
         Bukkit.broadcastMessage(ChatColor.RED + "  RED: " + redTeam.size() + ChatColor.GREEN + " vs " + ChatColor.BLUE + blueTeam.size());
         Bukkit.broadcastMessage(ChatColor.GREEN + "═══════════════════════════════");
+    }
+
+    public void startGenerators() {
+        new BukkitRunnable() {
+            int ticks = 0;
+
+            @Override
+            public void run() {
+                if (getGameState() != GameState.ACTIVE) {
+                    this.cancel();
+                    return;
+                }
+
+                ticks += 20; // 1 second has passed
+
+                // 1. GOLD GENERATORS (Every 1 Second)
+                for (Location loc : goldGens) {
+                    // THE CHECK LINE GOES HERE:
+                    if (loc.getWorld().getNearbyEntities(loc, 1, 1, 1).stream()
+                            .noneMatch(e -> e.getType() == org.bukkit.entity.EntityType.DROPPED_ITEM)) {
+                        loc.getWorld().dropItemNaturally(loc.clone().add(0.5, 1, 0.5), new ItemStack(Material.GOLD_INGOT));
+                    }
+                }
+
+                // 2. DIAMOND GENERATORS (Every 30 Seconds)
+                if (ticks % 600 == 0) {
+                    for (Location loc : diamondGens) {
+                        // THE CHECK LINE GOES HERE:
+                        if (loc.getWorld().getNearbyEntities(loc, 1, 1, 1).stream()
+                                .noneMatch(e -> e.getType() == org.bukkit.entity.EntityType.DROPPED_ITEM)) {
+                            loc.getWorld().dropItemNaturally(loc.clone().add(0.5, 1, 0.5), new ItemStack(Material.DIAMOND));
+                        }
+                    }
+                }
+
+                // 3. EMERALD GENERATORS (Every 60 Seconds)
+                if (ticks % 1200 == 0) {
+                    for (Location loc : emeraldGens) {
+                        // THE CHECK LINE GOES HERE:
+                        if (loc.getWorld().getNearbyEntities(loc, 1, 1, 1).stream()
+                                .noneMatch(e -> e.getType() == org.bukkit.entity.EntityType.DROPPED_ITEM)) {
+                            loc.getWorld().dropItemNaturally(loc.clone().add(0.5, 1, 0.5), new ItemStack(Material.EMERALD));
+                        }
+                    }
+                }
+            }
+        }.runTaskTimer(this, 0L, 20L);
     }
 
     private void startGameTimer() {
@@ -760,6 +849,7 @@ public class BridgeBattle extends JavaPlugin {
         blueTeam.clear();
         playerTeam.clear();
         playerKills.clear();
+        bowLevels.clear();
 
         // Update scoreboard for any remaining players
         for (Player player : Bukkit.getOnlinePlayers()) {
@@ -782,6 +872,14 @@ public class BridgeBattle extends JavaPlugin {
 
     public GameState getGameState() {
         return gameState;
+    }
+
+    public int getBowLevel(Player player) {
+        return bowLevels.getOrDefault(player.getUniqueId(), 1); // Default is Level 1
+    }
+
+    public void setBowLevel(Player player, int level) {
+        bowLevels.put(player.getUniqueId(), level);
     }
 
     // ==================== COMMANDS ====================
@@ -908,6 +1006,43 @@ public class BridgeBattle extends JavaPlugin {
                     p.sendMessage(ChatColor.RED + "Invalid number!");
                 }
                 return true;
+
+            case "setgen":
+                if (!p.hasPermission("bridge.admin")) return true;
+                if (args.length < 2) {
+                    p.sendMessage(ChatColor.RED + "Usage: /bridge setgen <gold|diamond|emerald>");
+                    return true;
+                }
+
+                String type = args[1].toLowerCase();
+                Location loc = p.getLocation().getBlock().getLocation(); // Center of the block
+
+                FileConfiguration configGenerator = getConfig();
+                String path = "generators." + type;
+                List<String> serializedLocs = configGenerator.getStringList(path);
+
+                // Save as "world,x,y,z" string
+                serializedLocs.add(loc.getWorld().getName() + "," + loc.getX() + "," + loc.getY() + "," + loc.getZ());
+                configGenerator.set(path, serializedLocs);
+                saveConfig();
+
+                // Add to active lists immediately
+                if (type.equals("gold")) goldGens.add(loc);
+                else if (type.equals("diamond")) diamondGens.add(loc);
+                else if (type.equals("emerald")) emeraldGens.add(loc);
+
+                p.sendMessage(ChatColor.GREEN + type.toUpperCase() + " generator set at your location!");
+                break;
+
+            case "spawnshop":
+                if (!p.hasPermission("bridge.admin")) return true;
+                Villager shopkeeper = p.getWorld().spawn(p.getLocation(), Villager.class);
+                shopkeeper.setCustomName(ChatColor.GOLD + "§lGAME SHOP");
+                shopkeeper.setCustomNameVisible(true);
+                shopkeeper.setAI(false); // Keeps him stationary
+                shopkeeper.setInvulnerable(true);
+                p.sendMessage(ChatColor.GREEN + "Shopkeeper spawned!");
+                break;
 
             case "top":
                 showTopKillers(p);

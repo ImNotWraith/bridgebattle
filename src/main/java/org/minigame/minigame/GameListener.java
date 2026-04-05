@@ -1,8 +1,11 @@
 package org.minigame.minigame;
 
 import org.bukkit.*;
+import org.bukkit.block.Block;
+import org.bukkit.entity.Arrow;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.Snowball;
+import org.bukkit.entity.Villager;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.BlockBreakEvent;
@@ -290,6 +293,52 @@ public class GameListener implements Listener {
                 e.setCancelled(true); // Stop them from opening the chest UI
                 plugin.handleChestCapture(clickedLoc, p);
                 return;
+            }
+        }
+    }
+
+    @EventHandler
+    public void onArrowHit(ProjectileHitEvent e) {
+        if (!(e.getEntity() instanceof Arrow)) return;
+        Arrow arrow = (Arrow) e.getEntity();
+        if (!(arrow.getShooter() instanceof Player)) return;
+
+        Player shooter = (Player) arrow.getShooter();
+        Block hitBlock = e.getHitBlock();
+
+        if (hitBlock != null && hitBlock.getType() == Material.WHITE_WOOL) {
+            // Basic Level 1: Destroy the hit block
+            hitBlock.setType(Material.AIR);
+            hitBlock.getWorld().playEffect(hitBlock.getLocation(), Effect.STEP_SOUND, Material.WHITE_WOOL);
+
+            // Level 2/3 Upgrade: Check if player has the "Explosive" upgrade
+            // We assume you store this in a Map<Player, Integer> bowUpgradeLevel;
+            int level = BridgeBattle.getInstance().getBowLevel(shooter);
+
+            if (level >= 2) {
+                // Destroy nearby 2 blocks (3x3 area)
+                for (int x = -1; x <= 1; x++) {
+                    for (int y = -1; y <= 1; y++) {
+                        for (int z = -1; z <= 1; z++) {
+                            Block b = hitBlock.getRelative(x, y, z);
+                            if (b.getType() == Material.WHITE_WOOL) {
+                                b.setType(Material.AIR);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        arrow.remove(); // Remove arrow after impact
+    }
+
+    @EventHandler
+    public void onNPCInteract(PlayerInteractEntityEvent e) {
+        if (e.getRightClicked() instanceof Villager) {
+            Villager v = (Villager) e.getRightClicked();
+            if (v.getCustomName() != null && v.getCustomName().contains("GAME SHOP")) {
+                e.setCancelled(true);
+                new GameShop().openMainMenu(e.getPlayer());
             }
         }
     }
