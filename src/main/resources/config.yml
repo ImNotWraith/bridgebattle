@@ -1,0 +1,25 @@
+# BridgeBattle Configuration
+# Spawn locations are saved here automatically
+
+spawns:
+  lobby:
+    world: "world"
+    x: 0.0
+    y: 64.0
+    z: 0.0
+    yaw: 0.0
+    pitch: 0.0
+  team1:
+    world: "world"
+    x: 100.0
+    y: 64.0
+    z: 100.0
+    yaw: 0.0
+    pitch: 0.0
+  team2:
+    world: "world"
+    x: -100.0
+    y: 64.0
+    z: -100.0
+    yaw: 0.0
+    pitch: 0.0
