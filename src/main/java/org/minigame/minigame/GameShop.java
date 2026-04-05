@@ -33,13 +33,22 @@ public class GameShop implements Listener {
 
     public void openBlocksMenu(Player p) {
         Inventory inv = Bukkit.createInventory(null, 9, "§8Building Blocks");
-        inv.setItem(4, createItem(Material.WHITE_WOOL, "§f32x Wool", "§7Cost: §610 Gold"));
+        // Increased cost from 10 to 32 Gold for 16 wool (Harder to bridge)
+        inv.setItem(4, createItem(Material.WHITE_WOOL, "§f16x Wool", "§7Cost: §632 Gold"));
         p.openInventory(inv);
     }
 
     public void openCombatMenu(Player p) {
         Inventory inv = Bukkit.createInventory(null, 9, "§8Combat Items");
-        inv.setItem(4, createItem(Material.ARROW, "§fExplosive Arrow", "§7Cost: §b2 Emeralds"));
+
+        // Sword: Costs Gold
+        inv.setItem(2, createItem(Material.STONE_SWORD, "§fStone Sword", "§7Cost: §648 Gold"));
+        inv.setItem(3, createItem(Material.IRON_SWORD, "§fIron Sword", "§7Cost: §b5 Emeralds"));
+
+        // Bow: Costs Emeralds (High value)
+        inv.setItem(5, createItem(Material.BOW, "§6Basic Bow", "§7Cost: §b3 Emeralds"));
+        inv.setItem(6, createItem(Material.ARROW, "§fArrows (8x)", "§7Cost: §620 Gold"));
+
         p.openInventory(inv);
     }
 
@@ -65,26 +74,49 @@ public class GameShop implements Listener {
         else if (name.contains("Combat Items")) openCombatMenu(p);
         else if (name.contains("Upgrades")) openUpgradesMenu(p);
 
-        // Example Purchase Logic (Wool)
-        if (name.contains("32x Wool")) {
-            if (p.getInventory().contains(Material.GOLD_INGOT, 10)) {
-                p.getInventory().removeItem(new ItemStack(Material.GOLD_INGOT, 10));
-                p.getInventory().addItem(new ItemStack(Material.WHITE_WOOL, 32));
-                p.sendMessage("§aPurchase successful!");
-            } else {
-                p.sendMessage("§cNot enough Gold!");
-            }
+        // BUYING LOGIC
+        if (name.contains("16x Wool")) {
+            Material woolToGive = getFormattedWool(p);
+            // Cost: 32 Gold for 16 Wool
+            handlePurchase(p, Material.GOLD_INGOT, 48, new ItemStack(woolToGive, 5));
+        }
+        else if (name.contains("Stone Sword")) {
+            handlePurchase(p, Material.GOLD_INGOT, 16, new ItemStack(Material.STONE_SWORD));
+        }
+        else if (name.contains("Iron Sword")) {
+            handlePurchase(p, Material.GOLD_INGOT, 32, new ItemStack(Material.IRON_SWORD));
+        }
+        else if (name.contains("Basic Bow")) {
+            handlePurchase(p, Material.EMERALD, 1, new ItemStack(Material.BOW));
+        }
+        else if (name.contains("Arrows (8x)")) {
+            handlePurchase(p, Material.GOLD_INGOT, 10, new ItemStack(Material.ARROW, 8));
+        }
+    }
+
+    // Helper for cleaner code
+    private void handlePurchase(Player p, Material currency, int price, ItemStack reward) {
+        if (p.getInventory().containsAtLeast(new ItemStack(currency), price)) {
+            p.getInventory().removeItem(new ItemStack(currency, price));
+            p.getInventory().addItem(reward);
+            p.sendMessage("§aYou purchased " + reward.getItemMeta().getDisplayName() + "!");
+            p.playSound(p.getLocation(), org.bukkit.Sound.ENTITY_EXPERIENCE_ORB_PICKUP, 1f, 1f);
+        } else {
+            p.sendMessage("§cYou need " + price + " " + currency.name().replace("_", " ") + "!");
+        }
+    }
+
+    private Material getFormattedWool(Player p) {
+        BridgeBattle plugin = BridgeBattle.getInstance();
+        // Check player's team from the main class
+        BridgeBattle.Team team = plugin.getPlayerTeam(p);
+
+        if (team == BridgeBattle.Team.RED) {
+            return Material.RED_WOOL;
+        } else if (team == BridgeBattle.Team.BLUE) {
+            return Material.BLUE_WOOL;
         }
 
-        // Example Purchase Logic (Upgrade)
-        if (name.contains("Bow Level 2")) {
-            if (p.getInventory().contains(Material.EMERALD, 5)) {
-                p.getInventory().removeItem(new ItemStack(Material.EMERALD, 5));
-                BridgeBattle.getInstance().setBowLevel(p, 2);
-                p.sendMessage("§bBow Upgraded to Level 2! §7(3x3 Destruction)");
-            } else {
-                p.sendMessage("§cNot enough Emeralds!");
-            }
-        }
+        return Material.WHITE_WOOL; // Fallback
     }
 }

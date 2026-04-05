@@ -4,6 +4,8 @@ import org.bukkit.*;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.configuration.file.FileConfiguration;
+import org.bukkit.entity.ArmorStand;
+import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.Villager;
 import org.bukkit.inventory.ItemStack;
@@ -19,1076 +21,609 @@ public class BridgeBattle extends JavaPlugin {
     private static BridgeBattle instance;
     private BridgeBattleGUI gameMenu;
 
-    // Game states
-    public enum GameState {
-        WAITING, COUNTDOWN, ACTIVE, ENDING
-    }
-
-    public enum Team {
-        RED, BLUE, NONE
-    }
+    public enum GameState { WAITING, COUNTDOWN, ACTIVE, ENDING }
+    public enum Team { RED, BLUE, NONE }
 
     private GameState gameState = GameState.WAITING;
+    private int currentRound = 1;
 
-    // Teams
     private List<Player> redTeam = new ArrayList<>();
     private List<Player> blueTeam = new ArrayList<>();
     private Map<Player, Team> playerTeam = new HashMap<>();
     private Map<Player, Integer> playerKills = new HashMap<>();
-
-    // Game stats
     private int redScore = 0;
     private int blueScore = 0;
-    private int roundTimeLeft = 180;
-    private BukkitRunnable gameTimer;
+
+    private int matchSeconds = 0;
+    private BukkitRunnable matchTimerTask;
     private BukkitRunnable countdownTimer;
     private int countdownSeconds = 10;
 
-    // Spawn locations
-    private Location lobbySpawn;
-    private Location redSpawn;
-    private Location blueSpawn;
-
-    // Bridge zone
-    private Location bridgeZoneMin;
-    private Location bridgeZoneMax;
-
-    // Chest Locations
+    private Location lobbySpawn, redSpawn, blueSpawn;
+    private Location bridgeZoneMin, bridgeZoneMax;
     private List<Location> chestLocations = new ArrayList<>();
     private Map<Location, Team> capturedChests = new HashMap<>();
-
-    // Combat Items
-    private Map<UUID, Integer> bowLevels = new HashMap<>();
-
-    // Generators
+    private List<Location> goldGens = new ArrayList<>();
     private List<Location> diamondGens = new ArrayList<>();
     private List<Location> emeraldGens = new ArrayList<>();
-    private List<Location> goldGens = new ArrayList<>();
+    private Map<Location, ArmorStand> genHolograms = new HashMap<>();
+
+    private Map<UUID, Integer> bowLevels = new HashMap<>();
+    private Set<Location> playerPlacedBlocks = new HashSet<>();
 
     @Override
     public void onEnable() {
         instance = this;
         saveDefaultConfig();
+
+        gameMenu = new BridgeBattleGUI(this);
+
         loadSpawns();
         loadBridgeZone();
+        loadChests();
         loadGenerators();
+        refreshHolograms();
 
-        this.gameMenu = new BridgeBattleGUI(this);
-        getServer().getPluginManager().registerEvents(this.gameMenu, this);
-
-        getServer().getPluginManager().registerEvents(new GameShop(), this);
         getServer().getPluginManager().registerEvents(new GameListener(), this);
-        getLogger().info(ChatColor.GREEN + "BridgeBattle enabled with GUI!");
-    }
+        getServer().getPluginManager().registerEvents(new GameShop(), this);
 
-    // Helper to open the menu
-    public void openGameMenu(Player player) {
-        player.openInventory(gameMenu.getInventory());
+        getLogger().info("§aBridgeBattle Enabled!");
     }
 
     @Override
     public void onDisable() {
-        // Optional: Clean up items near generators on shutdown
-        for (Location loc : goldGens) {
-            loc.getWorld().getNearbyEntities(loc, 2, 2, 2).forEach(entity -> {
-                if (entity instanceof org.bukkit.entity.Item) entity.remove();
-            });
+        for (ArmorStand holo : genHolograms.values()) {
+            holo.remove();
         }
-        getLogger().info(ChatColor.RED + "BridgeBattle disabled!");
+        genHolograms.clear();
     }
 
-    public static BridgeBattle getInstance() {
-        return instance;
+    // ==================== GETTERS ====================
+
+    public static BridgeBattle getInstance() { return instance; }
+    public GameState getGameState() { return gameState; }
+    public List<Location> getChestLocations() { return chestLocations; }
+    public Map<Location, Team> getCapturedChests() { return capturedChests; }
+    public List<Player> getAllPlayers() {
+        List<Player> l = new ArrayList<>(redTeam);
+        l.addAll(blueTeam);
+        return l;
     }
-
-    // ==================== SPAWN MANAGEMENT ====================
-
-    private void loadSpawns() {
-        FileConfiguration config = getConfig();
-        lobbySpawn = loadSpawn("lobby");
-        redSpawn = loadSpawn("red");
-        blueSpawn = loadSpawn("blue");
-    }
-
-    private void loadBridgeZone() {
-        FileConfiguration config = getConfig();
-        if (config.contains("bridge_zone")) {
-            World world = Bukkit.getWorld(config.getString("bridge_zone.world"));
-            if (world != null) {
-                bridgeZoneMin = new Location(world,
-                        config.getDouble("bridge_zone.min.x"),
-                        config.getDouble("bridge_zone.min.y"),
-                        config.getDouble("bridge_zone.min.z"));
-                bridgeZoneMax = new Location(world,
-                        config.getDouble("bridge_zone.max.x"),
-                        config.getDouble("bridge_zone.max.y"),
-                        config.getDouble("bridge_zone.max.z"));
-            }
-        }
-    }
-
-    private Location loadSpawn(String name) {
-        FileConfiguration config = getConfig();
-        if (!config.contains("spawns." + name)) return null;
-
-        World world = Bukkit.getWorld(config.getString("spawns." + name + ".world"));
-        if (world == null) return null;
-
-        return new Location(world,
-                config.getDouble("spawns." + name + ".x"),
-                config.getDouble("spawns." + name + ".y"),
-                config.getDouble("spawns." + name + ".z"),
-                (float) config.getDouble("spawns." + name + ".yaw"),
-                (float) config.getDouble("spawns." + name + ".pitch"));
-    }
-
-    private void loadChests() {
-        chestLocations.clear();
-        capturedChests.clear();
-        FileConfiguration config = getConfig();
-        for (int i = 1; i <= 3; i++) {
-            if (config.contains("chests.c" + i)) {
-                World w = Bukkit.getWorld(config.getString("chests.c" + i + ".world"));
-                Location loc = new Location(w,
-                        config.getDouble("chests.c" + i + ".x"),
-                        config.getDouble("chests.c" + i + ".y"),
-                        config.getDouble("chests.c" + i + ".z"));
-                chestLocations.add(loc);
-            }
-        }
-    }
-
-    private void saveSpawn(String name, Location loc) {
-        FileConfiguration config = getConfig();
-        config.set("spawns." + name + ".world", loc.getWorld().getName());
-        config.set("spawns." + name + ".x", loc.getX());
-        config.set("spawns." + name + ".y", loc.getY());
-        config.set("spawns." + name + ".z", loc.getZ());
-        config.set("spawns." + name + ".yaw", (double) loc.getYaw());
-        config.set("spawns." + name + ".pitch", (double) loc.getPitch());
-        saveConfig();
-    }
-
-    // Helper to set a chest location
-    public void setGameChest(int index, Location loc) {
-        if (index < 1 || index > 3) return;
-
-        FileConfiguration config = getConfig();
-        config.set("chests.c" + index + ".world", loc.getWorld().getName());
-        config.set("chests.c" + index + ".x", loc.getBlockX());
-        config.set("chests.c" + index + ".y", loc.getBlockY());
-        config.set("chests.c" + index + ".z", loc.getBlockZ());
-        saveConfig();
-
-        // Refresh the list
-        loadChests();
-    }
-
-    public void setSpawn(String type, Location location) {
-        switch (type.toLowerCase()) {
-            case "lobby":
-                lobbySpawn = location;
-                saveSpawn("lobby", location);
-                break;
-            case "red":
-                redSpawn = location;
-                saveSpawn("red", location);
-                break;
-            case "blue":
-                blueSpawn = location;
-                saveSpawn("blue", location);
-                break;
-        }
-    }
+    public Team getPlayerTeam(Player p) { return playerTeam.getOrDefault(p, Team.NONE); }
+    public int getTotalPlayers() { return redTeam.size() + blueTeam.size(); }
+    public Set<Location> getPlayerPlacedBlocks() { return playerPlacedBlocks; }
+    public int getBowLevel(Player p) { return bowLevels.getOrDefault(p.getUniqueId(), 1); }
+    public void setBowLevel(Player p, int l) { bowLevels.put(p.getUniqueId(), l); }
 
     public Location getSpawn(String type) {
-        switch (type.toLowerCase()) {
-            case "lobby": return lobbySpawn;
-            case "red": return redSpawn;
-            case "blue": return blueSpawn;
-            default: return null;
-        }
+        return switch (type.toLowerCase()) {
+            case "red" -> redSpawn;
+            case "blue" -> blueSpawn;
+            default -> lobbySpawn;
+        };
     }
 
-    public boolean isInBridgeZone(Location loc) {
-        if (bridgeZoneMin == null || bridgeZoneMax == null) return true;
-        return loc.getX() >= bridgeZoneMin.getX() && loc.getX() <= bridgeZoneMax.getX() &&
-                loc.getY() >= bridgeZoneMin.getY() && loc.getY() <= bridgeZoneMax.getY() &&
-                loc.getZ() >= bridgeZoneMin.getZ() && loc.getZ() <= bridgeZoneMax.getZ();
-    }
+    // ==================== COMBAT & POINTS ====================
 
-    // ==================== PLAYER MANAGEMENT ====================
-
-    public void joinGame(Player player) {
-        if (gameState != GameState.WAITING) {
-            player.sendMessage(ChatColor.RED + "Game already in progress!");
-            return;
-        }
-
-        if (playerTeam.containsKey(player)) {
-            player.sendMessage(ChatColor.RED + "You're already in the game!");
-            return;
-        }
-
-        // Auto-balance teams
-        Team team = getSmallestTeam();
-
-        if (team == Team.RED) {
-            redTeam.add(player);
-            playerTeam.put(player, Team.RED);
-            playerKills.put(player, 0);
-            player.sendMessage(ChatColor.GREEN + "You joined the " + ChatColor.RED + "RED TEAM!");
-            if (redSpawn != null) player.teleport(redSpawn);
-        } else if (team == Team.BLUE) {
-            blueTeam.add(player);
-            playerTeam.put(player, Team.BLUE);
-            playerKills.put(player, 0);
-            player.sendMessage(ChatColor.GREEN + "You joined the " + ChatColor.BLUE + "BLUE TEAM!");
-            if (blueSpawn != null) player.teleport(blueSpawn);
-        } else {
-            player.sendMessage(ChatColor.RED + "Game is full!");
-            return;
-        }
-
-        // Give game items
-        giveGameItems(player);
-
-        // Update scoreboard
+    public void addKill(Player player) {
+        playerKills.put(player, playerKills.getOrDefault(player, 0) + 1);
         updateScoreboard();
-
-        // Broadcast
-        Bukkit.broadcastMessage(ChatColor.GREEN + player.getName() + " joined the game! (" + getTotalPlayers() + "/" + getConfig().getInt("game.max-players") + ")");
-
-        // Check if we can start
-        checkStartGame();
     }
 
-    public void leaveGame(Player player) {
-        Team team = playerTeam.get(player);
-
-        if (team == Team.RED) {
-            redTeam.remove(player);
-        } else if (team == Team.BLUE) {
-            blueTeam.remove(player);
-        }
-
-        playerTeam.remove(player);
-        playerKills.remove(player);
-        bowLevels.remove(player.getUniqueId());
-
-        // Clear inventory
-        player.getInventory().clear();
-        player.getInventory().setArmorContents(null);
-
-        // Give lobby items
-        giveLobbyItems(player);
-
-        // Teleport to lobby
-        if (lobbySpawn != null) {
-            player.teleport(lobbySpawn);
-        }
-
-        player.sendMessage(ChatColor.YELLOW + "You left the game!");
-
-        // Update scoreboard for remaining players
-        for (Player p : getAllPlayers()) {
-            updateScoreboard(p);
-        }
-
-        // If game is active and teams become empty, end game
-        if (gameState == GameState.ACTIVE && (redTeam.isEmpty() || blueTeam.isEmpty())) {
-            endGame();
-        }
-
-        // If waiting and players left, cancel countdown
-        if (gameState == GameState.COUNTDOWN && getTotalPlayers() < getConfig().getInt("game.min-players")) {
-            cancelCountdown();
-        }
-    }
-
-    public void giveLobbyItems(Player player) {
-        player.getInventory().clear();
-
-        ItemStack joinItem = new ItemStack(Material.NETHER_STAR, 1);
-        ItemMeta meta = joinItem.getItemMeta();
-        meta.setDisplayName(ChatColor.GOLD + "Join Game");
-        meta.setLore(Arrays.asList(ChatColor.GRAY + "Right click to join the game!"));
-        joinItem.setItemMeta(meta);
-        player.getInventory().setItem(0, joinItem);
-    }
-
-    private Team getSmallestTeam() {
-        int maxPerTeam = getConfig().getInt("game.players-per-team", 3);
-        if (redTeam.size() < maxPerTeam && redTeam.size() <= blueTeam.size()) {
-            return Team.RED;
-        } else if (blueTeam.size() < maxPerTeam) {
-            return Team.BLUE;
-        }
-        return Team.NONE;
-    }
-
-    private int getTotalPlayers() {
-        return redTeam.size() + blueTeam.size();
-    }
-
-    private void checkStartGame() {
-        if (gameState != GameState.WAITING) return;
-
-        int total = getTotalPlayers();
-        int min = getConfig().getInt("game.min-players", 2);
-
-        if (total >= min) {
-            startCountdown();
-        }
-    }
-
-    private void loadGenerators() {
-        FileConfiguration config = getConfig();
-        goldGens = parseLocations(config.getStringList("generators.gold"));
-        diamondGens = parseLocations(config.getStringList("generators.diamond"));
-        emeraldGens = parseLocations(config.getStringList("generators.emerald"));
-    }
-
-    private List<Location> parseLocations(List<String> list) {
-        List<Location> locs = new ArrayList<>();
-        for (String s : list) {
-            String[] parts = s.split(",");
-            World w = Bukkit.getWorld(parts[0]);
-            if (w != null) {
-                locs.add(new Location(w, Double.parseDouble(parts[1]), Double.parseDouble(parts[2]), Double.parseDouble(parts[3])));
-            }
-        }
-        return locs;
-    }
-
-    // Returns the list of the 3 chest locations
-    public List<Location> getChestLocations() {
-        return chestLocations;
-    }
-
-    // Returns the map of which team has captured which chest
-    public Map<Location, Team> getCapturedChests() {
-        return capturedChests;
-    }
-
-    // Logic to check for a winner based on 2/3 chests
     public void claimChest(Location loc, Team team) {
+        if (capturedChests.containsKey(loc)) return;
         capturedChests.put(loc, team);
 
-        long redCount = capturedChests.values().stream().filter(t -> t == Team.RED).count();
-        long blueCount = capturedChests.values().stream().filter(t -> t == Team.BLUE).count();
-
-        if (redCount >= 2) {
-            winRound(Team.RED);
-        } else if (blueCount >= 2) {
-            winRound(Team.BLUE);
+        long count = capturedChests.values().stream().filter(t -> t == team).count();
+        if (count >= 2) {
+            winRound(team);
+        } else {
+            updateScoreboard();
         }
     }
 
-    // ==================== CHEST CAPTURE =======================
-
-    // Add this to your BridgeBattle class
     public void handleChestCapture(Location chestLoc, Player player) {
         Team team = getPlayerTeam(player);
-        if (team == Team.NONE) return;
+        if (team == Team.NONE || gameState != GameState.ACTIVE) return;
 
-        // Check if this chest was already captured this round
-        if (getCapturedChests().containsKey(chestLoc)) {
-            player.sendMessage(ChatColor.RED + "This chest has already been claimed!");
+        if (capturedChests.containsKey(chestLoc)) {
+            player.sendMessage("§cThis chest has already been captured!");
             return;
         }
 
         // Capture the chest
-        getCapturedChests().put(chestLoc, team);
+        capturedChests.put(chestLoc, team);
 
-        // Broadcast the capture
-        String teamName = (team == Team.RED) ? ChatColor.RED + "RED" : ChatColor.BLUE + "BLUE";
-        Bukkit.broadcastMessage(teamName + ChatColor.YELLOW + " has captured a chest! (" +
-                getTeamCapturedCount(team) + "/2 needed to win)");
+        // Broadcast it
+        String teamName = (team == Team.RED) ? "§cRED" : "§bBLUE";
+        Bukkit.broadcastMessage(teamName + " §ecaptured a chest!");
 
-        // Visual Feedback
-        player.playSound(player.getLocation(), Sound.BLOCK_CHEST_OPEN, 1f, 1f);
-        player.sendTitle("", teamName + ChatColor.WHITE + " captured a point!", 10, 40, 10);
-
-        // Check if the team reached 2 points
-        if (getTeamCapturedCount(team) >= 2) {
+        // Check if team has 2 out of 3 chests
+        long count = capturedChests.values().stream().filter(t -> t == team).count();
+        if (count >= 2) {
             winRound(team);
-        }
-    }
-
-    // Helper to count how many chests a specific team has
-    private int getTeamCapturedCount(Team team) {
-        int count = 0;
-        for (Team t : getCapturedChests().values()) {
-            if (t == team) count++;
-        }
-        return count;
-    }
-
-    // ==================== GAME START / COUNTDOWN / GENERATOR START ====================
-
-    private void startCountdown() {
-        gameState = GameState.COUNTDOWN;
-        countdownSeconds = getConfig().getInt("game.countdown-seconds", 10);
-
-        Bukkit.broadcastMessage(ChatColor.GREEN + "═══════════════════════════════");
-        Bukkit.broadcastMessage(ChatColor.GREEN + "  Enough players! Game starting!");
-        Bukkit.broadcastMessage(ChatColor.GREEN + "═══════════════════════════════");
-
-        countdownTimer = new BukkitRunnable() {
-            @Override
-            public void run() {
-                if (gameState != GameState.COUNTDOWN) {
-                    this.cancel();
-                    return;
-                }
-
-                if (countdownSeconds <= 0) {
-                    startGame();
-                    this.cancel();
-                    return;
-                }
-
-                if (countdownSeconds <= 10 || countdownSeconds % 5 == 0) {
-                    for (Player player : getAllPlayers()) {
-                        player.sendTitle(ChatColor.YELLOW + "" + countdownSeconds, "Get ready!", 0, 20, 0);
-                        player.playSound(player.getLocation(), Sound.UI_BUTTON_CLICK, 1.0f, 1.0f);
-                    }
-                    Bukkit.broadcastMessage(ChatColor.YELLOW + "Game starting in " + ChatColor.RED + countdownSeconds + ChatColor.YELLOW + " seconds!");
-                }
-
-                countdownSeconds--;
-            }
-        };
-
-        countdownTimer.runTaskTimer(this, 0L, 20L);
-    }
-
-    private void cancelCountdown() {
-        if (countdownTimer != null) {
-            countdownTimer.cancel();
-        }
-        gameState = GameState.WAITING;
-        Bukkit.broadcastMessage(ChatColor.RED + "Game start cancelled - not enough players!");
-    }
-
-    private void startGame() {
-        gameState = GameState.ACTIVE;
-        roundTimeLeft = getConfig().getInt("game.round-time-seconds", 180);
-
-        // Teleport players to team spawns and give items
-        for (Player player : redTeam) {
-            if (redSpawn != null) player.teleport(redSpawn);
-            giveGameItems(player);
-            player.sendTitle(ChatColor.RED + "GAME START!", "Build the bridge!", 10, 60, 20);
-            player.playSound(player.getLocation(), Sound.ENTITY_PLAYER_LEVELUP, 1.0f, 1.0f);
-        }
-
-        for (Player player : blueTeam) {
-            if (blueSpawn != null) player.teleport(blueSpawn);
-            giveGameItems(player);
-            player.sendTitle(ChatColor.BLUE + "GAME START!", "Build the bridge!", 10, 60, 20);
-            player.playSound(player.getLocation(), Sound.ENTITY_PLAYER_LEVELUP, 1.0f, 1.0f);
-        }
-
-        // Starts the generator
-        startGenerators();
-
-        // Start game timer
-        startGameTimer();
-
-        // Update scoreboard
-        for (Player player : getAllPlayers()) {
-            updateScoreboard(player);
-        }
-
-        Bukkit.broadcastMessage(ChatColor.AQUA + "Generators have been activated!");
-
-        // Broadcast start message
-        Bukkit.broadcastMessage(ChatColor.GREEN + "═══════════════════════════════");
-        Bukkit.broadcastMessage(ChatColor.GREEN + "  GAME STARTED!");
-        Bukkit.broadcastMessage(ChatColor.RED + "  RED: " + redTeam.size() + ChatColor.GREEN + " vs " + ChatColor.BLUE + blueTeam.size());
-        Bukkit.broadcastMessage(ChatColor.GREEN + "═══════════════════════════════");
-    }
-
-    public void startGenerators() {
-        new BukkitRunnable() {
-            int ticks = 0;
-
-            @Override
-            public void run() {
-                if (getGameState() != GameState.ACTIVE) {
-                    this.cancel();
-                    return;
-                }
-
-                ticks += 20; // 1 second has passed
-
-                // 1. GOLD GENERATORS (Every 1 Second)
-                for (Location loc : goldGens) {
-                    // THE CHECK LINE GOES HERE:
-                    if (loc.getWorld().getNearbyEntities(loc, 1, 1, 1).stream()
-                            .noneMatch(e -> e.getType() == org.bukkit.entity.EntityType.DROPPED_ITEM)) {
-                        loc.getWorld().dropItemNaturally(loc.clone().add(0.5, 1, 0.5), new ItemStack(Material.GOLD_INGOT));
-                    }
-                }
-
-                // 2. DIAMOND GENERATORS (Every 30 Seconds)
-                if (ticks % 600 == 0) {
-                    for (Location loc : diamondGens) {
-                        // THE CHECK LINE GOES HERE:
-                        if (loc.getWorld().getNearbyEntities(loc, 1, 1, 1).stream()
-                                .noneMatch(e -> e.getType() == org.bukkit.entity.EntityType.DROPPED_ITEM)) {
-                            loc.getWorld().dropItemNaturally(loc.clone().add(0.5, 1, 0.5), new ItemStack(Material.DIAMOND));
-                        }
-                    }
-                }
-
-                // 3. EMERALD GENERATORS (Every 60 Seconds)
-                if (ticks % 1200 == 0) {
-                    for (Location loc : emeraldGens) {
-                        // THE CHECK LINE GOES HERE:
-                        if (loc.getWorld().getNearbyEntities(loc, 1, 1, 1).stream()
-                                .noneMatch(e -> e.getType() == org.bukkit.entity.EntityType.DROPPED_ITEM)) {
-                            loc.getWorld().dropItemNaturally(loc.clone().add(0.5, 1, 0.5), new ItemStack(Material.EMERALD));
-                        }
-                    }
-                }
-            }
-        }.runTaskTimer(this, 0L, 20L);
-    }
-
-    private void startGameTimer() {
-        gameTimer = new BukkitRunnable() {
-            @Override
-            public void run() {
-                if (gameState != GameState.ACTIVE) {
-                    this.cancel();
-                    return;
-                }
-
-                if (roundTimeLeft <= 0) {
-                    roundTimeUp();
-                    this.cancel();
-                    return;
-                }
-
-                // Update action bar every second
-                for (Player player : getAllPlayers()) {
-                    player.sendActionBar(ChatColor.GOLD + "Time: " + formatTime(roundTimeLeft) +
-                            ChatColor.WHITE + " | " + ChatColor.RED + redScore + ChatColor.WHITE + " - " +
-                            ChatColor.BLUE + blueScore);
-                }
-
-                roundTimeLeft--;
-            }
-        };
-        gameTimer.runTaskTimer(this, 0L, 20L);
-    }
-
-    private String formatTime(int seconds) {
-        int minutes = seconds / 60;
-        int secs = seconds % 60;
-        return String.format("%d:%02d", minutes, secs);
-    }
-
-    private void roundTimeUp() {
-        Bukkit.broadcastMessage(ChatColor.YELLOW + "Time's up! Round ended!");
-        resetRound();
-    }
-
-    // ==================== GAME ITEMS ====================
-
-    private void giveGameItems(Player player) {
-        player.getInventory().clear();
-        player.getInventory().setArmorContents(null);
-
-        // Bridge blocks
-        ItemStack blocks = new ItemStack(Material.WHITE_WOOL, 64);
-        ItemMeta blockMeta = blocks.getItemMeta();
-        blockMeta.setDisplayName(ChatColor.AQUA + "Bridge Blocks");
-        blocks.setItemMeta(blockMeta);
-        player.getInventory().setItem(1, blocks);
-
-        // Snowballs
-        ItemStack snowballs = new ItemStack(Material.SNOWBALL, 32);
-        ItemMeta snowMeta = snowballs.getItemMeta();
-        snowMeta.setDisplayName(ChatColor.WHITE + "Knockback Snowball");
-        snowballs.setItemMeta(snowMeta);
-        player.getInventory().setItem(2, snowballs);
-
-        // Knockback sword
-        ItemStack sword = new ItemStack(Material.WOODEN_SWORD, 1);
-        ItemMeta swordMeta = sword.getItemMeta();
-        swordMeta.setDisplayName(ChatColor.GOLD + "Knockback Sword");
-        swordMeta.setUnbreakable(true);
-        sword.setItemMeta(swordMeta);
-        player.getInventory().setItem(0, sword);
-
-        // Team armor
-        Team team = playerTeam.get(player);
-        if (team == Team.RED) {
-            player.getInventory().setHelmet(new ItemStack(Material.RED_WOOL));
         } else {
-            player.getInventory().setHelmet(new ItemStack(Material.BLUE_WOOL));
+            updateScoreboard();
         }
     }
 
-    // ==================== KILL MANAGEMENT ====================
+    // ==================== MATCH TIMER ====================
 
-    public void addKill(Player player) {
-        int kills = playerKills.getOrDefault(player, 0) + 1;
-        playerKills.put(player, kills);
-
-        // Update scoreboard for all players
-        for (Player p : getAllPlayers()) {
-            updateScoreboard(p);
-        }
-
-        // Play sound
-        player.playSound(player.getLocation(), Sound.ENTITY_PLAYER_LEVELUP, 1.0f, 1.0f);
+    private void startMatchTimer() {
+        matchSeconds = 0;
+        if (matchTimerTask != null) matchTimerTask.cancel();
+        matchTimerTask = new BukkitRunnable() {
+            @Override
+            public void run() {
+                if (gameState != GameState.ACTIVE) { this.cancel(); return; }
+                matchSeconds++;
+                updateScoreboard();
+            }
+        };
+        matchTimerTask.runTaskTimer(this, 0L, 20L);
     }
 
-    public int getKills(Player player) {
-        return playerKills.getOrDefault(player, 0);
+    private String formatMatchTime(int totalSeconds) {
+        return String.format("%d:%02d", totalSeconds / 60, totalSeconds % 60);
     }
 
-    // ==================== SCOREBOARD ====================
+    // ==================== CORE MATCH LOGIC ====================
 
-    public void updateScoreboard() {
-        for (Player player : getAllPlayers()) {
-            updateScoreboard(player);
-        }
+    public void startGame() {
+        gameState = GameState.ACTIVE;
+        currentRound = 1;
+        redScore = 0;
+        blueScore = 0;
+        resetRoundData(false);
+        startMatchTimer();
+        startGenerators();
+        Bukkit.broadcastMessage("§a§lMatch Started! First team to 2 rounds wins.");
     }
-
-    public void updateScoreboard(Player player) {
-        ScoreboardManager manager = Bukkit.getScoreboardManager();
-        Scoreboard board = manager.getNewScoreboard();
-        Objective obj = board.registerNewObjective("bridge", "dummy", ChatColor.GOLD + "⚔ Bridge Battle ⚔");
-        obj.setDisplaySlot(DisplaySlot.SIDEBAR);
-
-        // Team scores
-        obj.getScore(ChatColor.RED + "Red Team: " + redScore).setScore(5);
-        obj.getScore(ChatColor.BLUE + "Blue Team: " + blueScore).setScore(4);
-        obj.getScore(ChatColor.GRAY + "─────────────").setScore(3);
-
-        // Player kills
-        obj.getScore(ChatColor.YELLOW + "Top Kills:").setScore(2);
-
-        // Get top 3 killers
-        List<Map.Entry<Player, Integer>> sortedKills = new ArrayList<>(playerKills.entrySet());
-        sortedKills.sort((a, b) -> b.getValue().compareTo(a.getValue()));
-
-        int rank = 1;
-        for (int i = 0; i < Math.min(3, sortedKills.size()); i++) {
-            Map.Entry<Player, Integer> entry = sortedKills.get(i);
-            String name = entry.getKey().getName();
-            if (name.length() > 12) name = name.substring(0, 12);
-            obj.getScore(ChatColor.WHITE + "#" + rank + " " + name + ": " + entry.getValue()).setScore(2 - rank);
-            rank++;
-        }
-
-        // Game state
-        String state = "";
-        switch (gameState) {
-            case WAITING:
-                state = ChatColor.YELLOW + "Waiting...";
-                break;
-            case COUNTDOWN:
-                state = ChatColor.YELLOW + "Starting: " + countdownSeconds;
-                break;
-            case ACTIVE:
-                state = ChatColor.GREEN + "LIVE!";
-                break;
-            case ENDING:
-                state = ChatColor.RED + "Ending...";
-                break;
-        }
-        obj.getScore(ChatColor.GRAY + "─────────────").setScore(-1);
-        obj.getScore(ChatColor.AQUA + "Status: " + state).setScore(-2);
-
-        player.setScoreboard(board);
-    }
-
-    // ==================== ROUND MANAGEMENT ====================
 
     public void winRound(Team team) {
-        if (gameState != GameState.ACTIVE) return;
+        if (team == Team.RED) redScore++; else blueScore++;
 
-        if (team == Team.RED) {
-            redScore++;
-            Bukkit.broadcastMessage(ChatColor.RED + "═══════════════════════════════");
-            Bukkit.broadcastMessage(ChatColor.RED + "  RED TEAM WINS THE ROUND!");
-            Bukkit.broadcastMessage(ChatColor.GREEN + "  Score: " + ChatColor.RED + redScore + ChatColor.GREEN + " - " + ChatColor.BLUE + blueScore);
-            Bukkit.broadcastMessage(ChatColor.RED + "═══════════════════════════════");
-        } else {
-            blueScore++;
-            Bukkit.broadcastMessage(ChatColor.BLUE + "═══════════════════════════════");
-            Bukkit.broadcastMessage(ChatColor.BLUE + "  BLUE TEAM WINS THE ROUND!");
-            Bukkit.broadcastMessage(ChatColor.GREEN + "  Score: " + ChatColor.RED + redScore + ChatColor.GREEN + " - " + ChatColor.BLUE + blueScore);
-            Bukkit.broadcastMessage(ChatColor.BLUE + "═══════════════════════════════");
-        }
-
-        // Play win sound
-        for (Player player : getAllPlayers()) {
-            player.playSound(player.getLocation(), Sound.UI_TOAST_CHALLENGE_COMPLETE, 1.0f, 1.0f);
-        }
-
-        int roundsToWin = getConfig().getInt("game.rounds-to-win", 3);
-
-        if (redScore >= roundsToWin) {
-            Bukkit.broadcastMessage(ChatColor.GOLD + "★★★★★★★★★★★★★★★★★★★★★★★");
-            Bukkit.broadcastMessage(ChatColor.GOLD + "  RED TEAM WINS THE MATCH!");
-            Bukkit.broadcastMessage(ChatColor.GOLD + "★★★★★★★★★★★★★★★★★★★★★★★");
-            endGame();
-        } else if (blueScore >= roundsToWin) {
-            Bukkit.broadcastMessage(ChatColor.GOLD + "★★★★★★★★★★★★★★★★★★★★★★★");
-            Bukkit.broadcastMessage(ChatColor.GOLD + "  BLUE TEAM WINS THE MATCH!");
-            Bukkit.broadcastMessage(ChatColor.GOLD + "★★★★★★★★★★★★★★★★★★★★★★★");
+        if (redScore >= 2 || blueScore >= 2) {
+            Bukkit.broadcastMessage("§6§l" + team.name() + " WINS THE MATCH!");
             endGame();
         } else {
-            // Reset round after delay
-            new BukkitRunnable() {
-                @Override
-                public void run() {
-                    resetRound();
-                }
-            }.runTaskLater(this, 80L);
+            currentRound++;
+            resetRoundData(true);
         }
     }
 
-    private void resetRound() {
-        // Clear all bridge blocks (scan and remove white wool in bridge zone)
-        if (bridgeZoneMin != null && bridgeZoneMax != null) {
-            for (int x = (int) bridgeZoneMin.getX(); x <= (int) bridgeZoneMax.getX(); x++) {
-                for (int y = (int) bridgeZoneMin.getY(); y <= (int) bridgeZoneMax.getY(); y++) {
-                    for (int z = (int) bridgeZoneMin.getZ(); z <= (int) bridgeZoneMax.getZ(); z++) {
-                        Location loc = new Location(bridgeZoneMin.getWorld(), x, y, z);
-                        if (loc.getBlock().getType() == Material.WHITE_WOOL) {
-                            loc.getBlock().setType(Material.AIR);
-                        }
+    private void resetRoundData(boolean midGame) {
+        capturedChests.clear();
+        playerPlacedBlocks.clear();
+        clearBridgeWool();
+
+        for (Player p : getAllPlayers()) {
+            p.getInventory().clear();
+            p.teleport(getPlayerTeam(p) == Team.RED ? redSpawn : blueSpawn);
+            p.setHealth(20);
+            p.setFoodLevel(20);
+            giveGameItems(p);
+            if (midGame) p.sendTitle("§eROUND " + currentRound, "§7Chests have reset!", 10, 40, 10);
+        }
+    }
+
+    private void clearBridgeWool() {
+        if (bridgeZoneMin == null || bridgeZoneMax == null) return;
+        World w = bridgeZoneMin.getWorld();
+        int minX = Math.min(bridgeZoneMin.getBlockX(), bridgeZoneMax.getBlockX());
+        int maxX = Math.max(bridgeZoneMin.getBlockX(), bridgeZoneMax.getBlockX());
+        int minY = Math.min(bridgeZoneMin.getBlockY(), bridgeZoneMax.getBlockY());
+        int maxY = Math.max(bridgeZoneMin.getBlockY(), bridgeZoneMax.getBlockY());
+        int minZ = Math.min(bridgeZoneMin.getBlockZ(), bridgeZoneMax.getBlockZ());
+        int maxZ = Math.max(bridgeZoneMin.getBlockZ(), bridgeZoneMax.getBlockZ());
+
+        for (int x = minX; x <= maxX; x++) {
+            for (int y = minY; y <= maxY; y++) {
+                for (int z = minZ; z <= maxZ; z++) {
+                    if (w.getBlockAt(x, y, z).getType().name().contains("WOOL")) {
+                        w.getBlockAt(x, y, z).setType(Material.AIR);
                     }
                 }
             }
         }
-
-        // Reset player positions and inventory
-        for (Player player : redTeam) {
-            player.getInventory().clear();
-            player.getInventory().setArmorContents(null);
-            if (redSpawn != null) player.teleport(redSpawn);
-            player.setHealth(20);
-            player.setFoodLevel(20);
-            giveGameItems(player);
-            player.sendMessage(ChatColor.YELLOW + "Next round starting!");
-        }
-
-        for (Player player : blueTeam) {
-            player.getInventory().clear();
-            player.getInventory().setArmorContents(null);
-            if (blueSpawn != null) player.teleport(blueSpawn);
-            player.setHealth(20);
-            player.setFoodLevel(20);
-            giveGameItems(player);
-            player.sendMessage(ChatColor.YELLOW + "Next round starting!");
-        }
-
-        for (Location loc : chestLocations) {
-            loc.clone().add(0, 1, 0).getBlock().setType(Material.AIR);
-        }
-
-        // Reset timer
-        if (gameTimer != null) gameTimer.cancel();
-        roundTimeLeft = getConfig().getInt("game.round-time-seconds", 180);
-        startGameTimer();
-
-        // Update scoreboard
-        updateScoreboard();
-        capturedChests.clear();
-
-        // Clear the capture data so chests can be opened again
-        getCapturedChests().clear();
-
-        Bukkit.broadcastMessage(ChatColor.GOLD + "The 3 chests have been reset! First to 2 wins!");
-
-        // Brief countdown for next round
-        new BukkitRunnable() {
-            int count = 5;
-            @Override
-            public void run() {
-                if (count <= 0) {
-                    Bukkit.broadcastMessage(ChatColor.GREEN + "Round started!");
-                    this.cancel();
-                    return;
-                }
-                for (Player player : getAllPlayers()) {
-                    player.sendTitle(ChatColor.YELLOW + "" + count, "Next round!", 0, 20, 0);
-                }
-                count--;
-            }
-        }.runTaskTimer(this, 0L, 20L);
     }
 
     public void endGame() {
-        if (gameTimer != null) gameTimer.cancel();
+        gameState = GameState.WAITING;
+        if (matchTimerTask != null) matchTimerTask.cancel();
         if (countdownTimer != null) countdownTimer.cancel();
 
-        gameState = GameState.WAITING;
-        redScore = 0;
-        blueScore = 0;
-
-        for (Player player : getAllPlayers()) {
-            player.getInventory().clear();
-            player.getInventory().setArmorContents(null);
-            if (lobbySpawn != null) player.teleport(lobbySpawn);
-            giveLobbyItems(player);
-            player.sendMessage(ChatColor.YELLOW + "Game ended! Use /bridge join to play again!");
+        for (Player p : getAllPlayers()) {
+            if (lobbySpawn != null) p.teleport(lobbySpawn);
+            p.getInventory().clear();
+            giveLobbyItems(p);
         }
 
         redTeam.clear();
         blueTeam.clear();
         playerTeam.clear();
         playerKills.clear();
-        bowLevels.clear();
+        updateScoreboard();
+    }
 
-        // Update scoreboard for any remaining players
-        for (Player player : Bukkit.getOnlinePlayers()) {
-            updateScoreboard(player);
+    // ==================== LOBBY LOGIC ====================
+
+    public void joinGame(Player player) {
+        if (gameState != GameState.WAITING && gameState != GameState.COUNTDOWN) {
+            player.sendMessage("§cGame in progress!");
+            return;
+        }
+
+        if (playerTeam.containsKey(player)) return;
+
+        Team team = (redTeam.size() <= blueTeam.size()) ? Team.RED : Team.BLUE;
+        if (team == Team.RED) redTeam.add(player); else blueTeam.add(player);
+
+        playerTeam.put(player, team);
+        playerKills.put(player, 0);
+
+        if (lobbySpawn != null) player.teleport(lobbySpawn);
+        giveLobbyItems(player);
+        updateScoreboard();
+
+        Bukkit.broadcastMessage("§a" + player.getName() + " joined! (" + getTotalPlayers() + "/min 2)");
+        checkStartGame();
+    }
+
+    public void leaveGame(Player p) {
+        if (playerTeam.get(p) == Team.RED) redTeam.remove(p);
+        else blueTeam.remove(p);
+
+        playerTeam.remove(p);
+        playerKills.remove(p);
+        bowLevels.remove(p.getUniqueId());
+
+        p.getInventory().clear();
+        if (lobbySpawn != null) p.teleport(lobbySpawn);
+        giveLobbyItems(p);
+        updateScoreboard();
+
+        if (gameState == GameState.ACTIVE && (redTeam.isEmpty() || blueTeam.isEmpty())) {
+            endGame();
+        } else {
+            checkStartGame();
         }
     }
 
-    // ==================== UTILITIES ====================
-
-    public List<Player> getAllPlayers() {
-        List<Player> all = new ArrayList<>();
-        all.addAll(redTeam);
-        all.addAll(blueTeam);
-        return all;
+    public void checkStartGame() {
+        if (getTotalPlayers() >= 2 && gameState == GameState.WAITING) {
+            startCountdown();
+        } else if (getTotalPlayers() < 2 && gameState == GameState.COUNTDOWN) {
+            cancelCountdown();
+        }
     }
 
-    public Team getPlayerTeam(Player player) {
-        return playerTeam.getOrDefault(player, Team.NONE);
+    private void startCountdown() {
+        gameState = GameState.COUNTDOWN;
+        countdownSeconds = 10;
+
+        if (countdownTimer != null) countdownTimer.cancel();
+
+        countdownTimer = new BukkitRunnable() {
+            @Override
+            public void run() {
+                if (getTotalPlayers() < 2) {
+                    cancelCountdown();
+                    this.cancel();
+                    return;
+                }
+                if (countdownSeconds <= 0) {
+                    startGame();
+                    this.cancel();
+                    return;
+                }
+                for (Player p : Bukkit.getOnlinePlayers()) {
+                    p.sendActionBar("§eStarting in §c" + countdownSeconds + "§es...");
+                    if (countdownSeconds <= 3) {
+                        p.playSound(p.getLocation(), Sound.BLOCK_NOTE_BLOCK_PLING, 1f, 2f);
+                    }
+                }
+                countdownSeconds--;
+                updateScoreboard();
+            }
+        };
+        countdownTimer.runTaskTimer(this, 0L, 20L);
     }
 
-    public GameState getGameState() {
-        return gameState;
+    private void cancelCountdown() {
+        if (countdownTimer != null) countdownTimer.cancel();
+        gameState = GameState.WAITING;
+        Bukkit.broadcastMessage("§cStart cancelled - need at least 2 players.");
+        updateScoreboard();
     }
 
-    public int getBowLevel(Player player) {
-        return bowLevels.getOrDefault(player.getUniqueId(), 1); // Default is Level 1
+    // ==================== INVENTORIES ====================
+
+    public void giveGameItems(Player p) {
+        p.getInventory().clear();
+        p.getInventory().setArmorContents(null);
+        p.getInventory().setHelmet(new ItemStack(getPlayerTeam(p) == Team.RED ? Material.RED_WOOL : Material.BLUE_WOOL));
     }
 
-    public void setBowLevel(Player player, int level) {
-        bowLevels.put(player.getUniqueId(), level);
+    public void giveLobbyItems(Player p) {
+        p.getInventory().clear();
+        p.getInventory().setArmorContents(null);
+        ItemStack join = new ItemStack(Material.NETHER_STAR);
+        ItemMeta m = join.getItemMeta();
+        m.setDisplayName("§6Join Match");
+        join.setItemMeta(m);
+        p.getInventory().setItem(0, join);
     }
 
-    // ==================== COMMANDS ====================
+    // ==================== COMMAND HANDLER ====================
 
     @Override
     public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
-        if (!(sender instanceof Player)) return true;
-        Player p = (Player) sender;
-
-        // Change /b to open the GUI instead of auto-joining
-        if (command.getName().equalsIgnoreCase("b")) {
+        if (!(sender instanceof Player p)) return true;
+        if (args.length == 0 || command.getName().equalsIgnoreCase("b")) {
             openGameMenu(p);
             return true;
         }
 
-        if (args.length > 0 && args[0].equalsIgnoreCase("join")) {
-            openGameMenu(p); // Open GUI when they type /bridge join
-            return true;
-        }
-
         switch (args[0].toLowerCase()) {
-            case "join":
-                joinGame(p);
-                break;
-
-            case "leave":
-                leaveGame(p);
-                break;
-
-            case "start":
-                if (!p.hasPermission("bridge.admin")) {
-                    p.sendMessage(ChatColor.RED + "No permission!");
-                    return true;
-                }
-                if (getTotalPlayers() >= 2) {
-                    if (countdownTimer != null) countdownTimer.cancel();
-                    startGame();
-                } else {
-                    p.sendMessage(ChatColor.RED + "Not enough players!");
-                }
-                break;
-
-            case "end":
-                if (!p.hasPermission("bridge.admin")) {
-                    p.sendMessage(ChatColor.RED + "No permission!");
-                    return true;
-                }
-                endGame();
-                break;
-
-            case "setspawn":
-                if (!p.hasPermission("bridge.admin")) {
-                    p.sendMessage(ChatColor.RED + "No permission!");
-                    return true;
-                }
-                if (args.length < 2) {
-                    p.sendMessage(ChatColor.RED + "Usage: /bridge setspawn <lobby|red|blue>");
-                    return true;
-                }
+            case "join" -> openGameMenu(p);
+            case "leave" -> leaveGame(p);
+            case "start" -> { if (p.hasPermission("bridge.admin")) startGame(); }
+            case "stop" -> { if (p.hasPermission("bridge.admin")) endGame(); }
+            case "setspawn" -> {
+                if (!p.hasPermission("bridge.admin")) return true;
+                if (args.length < 2) { p.sendMessage("§cUsage: /bridge setspawn <lobby|red|blue>"); return true; }
                 setSpawn(args[1], p.getLocation());
-                p.sendMessage(ChatColor.GREEN + "Spawn " + args[1] + " set!");
-                break;
-
-            case "setbridgezone":
-                if (!p.hasPermission("bridge.admin")) {
-                    p.sendMessage(ChatColor.RED + "No permission!");
-                    return true;
-                }
-                if (args.length < 2) {
-                    p.sendMessage(ChatColor.RED + "Usage: /bridge setbridgezone <min|max>");
-                    return true;
-                }
-                FileConfiguration config = getConfig();
-                World w = p.getWorld();
-                if (args[1].equalsIgnoreCase("min")) {
-                    config.set("bridge_zone.world", w.getName());
-                    config.set("bridge_zone.min.x", p.getLocation().getX());
-                    config.set("bridge_zone.min.y", p.getLocation().getY());
-                    config.set("bridge_zone.min.z", p.getLocation().getZ());
-                    p.sendMessage(ChatColor.GREEN + "Bridge zone MIN corner set!");
-                } else if (args[1].equalsIgnoreCase("max")) {
-                    config.set("bridge_zone.max.x", p.getLocation().getX());
-                    config.set("bridge_zone.max.y", p.getLocation().getY());
-                    config.set("bridge_zone.max.z", p.getLocation().getZ());
-                    p.sendMessage(ChatColor.GREEN + "Bridge zone MAX corner set!");
-                }
-                saveConfig();
-                loadBridgeZone();
-                break;
-
-            case "setchest":
-                if (!p.hasPermission("bridge.admin")) {
-                    p.sendMessage(ChatColor.RED + "No permission!");
-                    return true;
-                }
-
-                if (args.length < 2) {
-                    p.sendMessage(ChatColor.RED + "Usage: /bridge setchest <1|2|3>");
-                    return true;
-                }
-
-                try {
-                    int id = Integer.parseInt(args[1]);
-                    if (id < 1 || id > 3) {
-                        p.sendMessage(ChatColor.RED + "Use chest number 1, 2, or 3!");
-                        return true;
-                    }
-
-                    // Get the block the player is LOOKING at
-                    org.bukkit.block.Block targetBlock = p.getTargetBlockExact(5);
-
-                    if (targetBlock == null || targetBlock.getType() != Material.CHEST) {
-                        p.sendMessage(ChatColor.RED + "You must be looking at a Chest to set it!");
-                        return true;
-                    }
-
-                    Location loc = targetBlock.getLocation();
-                    setGameChest(id, loc); // This saves it to your config
-
-                    p.sendMessage(ChatColor.GOLD + "Successfully set " + ChatColor.YELLOW + "Game Chest #" + id);
-                    p.playSound(p.getLocation(), Sound.BLOCK_NOTE_BLOCK_CHIME, 1f, 2f);
-
-                } catch (NumberFormatException ex) {
-                    p.sendMessage(ChatColor.RED + "Invalid number!");
-                }
-                return true;
-
-            case "setgen":
+                p.sendMessage("§aSpawn " + args[1] + " set!");
+            }
+            case "setgen" -> {
                 if (!p.hasPermission("bridge.admin")) return true;
-                if (args.length < 2) {
-                    p.sendMessage(ChatColor.RED + "Usage: /bridge setgen <gold|diamond|emerald>");
+                if (args.length < 2) { p.sendMessage("§cUsage: /bridge setgen <gold|diamond|emerald>"); return true; }
+                setupGenerator(p, args[1].toLowerCase());
+            }
+            case "removegen" -> {
+                if (!p.hasPermission("bridge.admin")) return true;
+                removeNearestGenerator(p);
+            }
+            case "setbridgezone" -> {
+                if (!p.hasPermission("bridge.admin")) return true;
+                if (args.length < 2) { p.sendMessage("§cUsage: /bridge setbridgezone <min|max>"); return true; }
+                setBridgeZone(p, args[1].toLowerCase());
+            }
+            case "setchest" -> {
+                if (!p.hasPermission("bridge.admin")) return true;
+                if (args.length < 2) { p.sendMessage("§cUsage: /bridge setchest <1|2|3>"); return true; }
+                org.bukkit.block.Block target = p.getTargetBlockExact(5);
+                if (target == null || target.getType() != Material.CHEST) {
+                    p.sendMessage("§cYou must be looking at a Chest!");
                     return true;
                 }
-
-                String type = args[1].toLowerCase();
-                Location loc = p.getLocation().getBlock().getLocation(); // Center of the block
-
-                FileConfiguration configGenerator = getConfig();
-                String path = "generators." + type;
-                List<String> serializedLocs = configGenerator.getStringList(path);
-
-                // Save as "world,x,y,z" string
-                serializedLocs.add(loc.getWorld().getName() + "," + loc.getX() + "," + loc.getY() + "," + loc.getZ());
-                configGenerator.set(path, serializedLocs);
-                saveConfig();
-
-                // Add to active lists immediately
-                if (type.equals("gold")) goldGens.add(loc);
-                else if (type.equals("diamond")) diamondGens.add(loc);
-                else if (type.equals("emerald")) emeraldGens.add(loc);
-
-                p.sendMessage(ChatColor.GREEN + type.toUpperCase() + " generator set at your location!");
-                break;
-
-            case "spawnshop":
+                setGameChest(Integer.parseInt(args[1]), target.getLocation());
+                p.sendMessage("§aChest goal " + args[1] + " set!");
+            }
+            case "spawnshop" -> {
                 if (!p.hasPermission("bridge.admin")) return true;
-                Villager shopkeeper = p.getWorld().spawn(p.getLocation(), Villager.class);
-                shopkeeper.setCustomName(ChatColor.GOLD + "§lGAME SHOP");
-                shopkeeper.setCustomNameVisible(true);
-                shopkeeper.setAI(false); // Keeps him stationary
-                shopkeeper.setInvulnerable(true);
-                p.sendMessage(ChatColor.GREEN + "Shopkeeper spawned!");
-                break;
-
-            case "top":
-                showTopKillers(p);
-                break;
-
-            default:
-                sendHelp(p);
-                break;
+                Villager v = p.getWorld().spawn(p.getLocation(), Villager.class);
+                v.setCustomName("§6§lGAME SHOP");
+                v.setCustomNameVisible(true);
+                v.setAI(false);
+                v.setInvulnerable(true);
+                p.sendMessage("§aShop spawned.");
+            }
+            case "removeshop" -> {
+                if (!p.hasPermission("bridge.admin")) return true;
+                p.getNearbyEntities(5, 5, 5).stream()
+                        .filter(e -> e instanceof Villager && e.getCustomName() != null && e.getCustomName().contains("SHOP"))
+                        .forEach(Entity::remove);
+                p.sendMessage("§cShops removed.");
+            }
+            default -> p.sendMessage("§cUnknown command.");
         }
-
         return true;
     }
 
-    private void showTopKillers(Player player) {
-        player.sendMessage(ChatColor.GOLD + "══════ Top Killers ══════");
-
-        List<Map.Entry<Player, Integer>> sortedKills = new ArrayList<>(playerKills.entrySet());
-        sortedKills.sort((a, b) -> b.getValue().compareTo(a.getValue()));
-
-        int rank = 1;
-        for (Map.Entry<Player, Integer> entry : sortedKills) {
-            String team = playerTeam.get(entry.getKey()) == Team.RED ? ChatColor.RED + "RED" : ChatColor.BLUE + "BLUE";
-            player.sendMessage(ChatColor.YELLOW + "#" + rank + " " + team + ChatColor.WHITE + " " + entry.getKey().getName() + ": " + ChatColor.GREEN + entry.getValue() + " kills");
-            rank++;
-            if (rank > 10) break;
-        }
-
-        if (sortedKills.isEmpty()) {
-            player.sendMessage(ChatColor.GRAY + "No kills yet!");
-        }
-
-        player.sendMessage(ChatColor.GOLD + "═══════════════════════════");
+    public void openGameMenu(Player p) {
+        if (gameMenu == null) gameMenu = new BridgeBattleGUI(this);
+        p.openInventory(gameMenu.getInventory());
     }
 
-    private void sendHelp(Player p) {
-        p.sendMessage(ChatColor.GOLD + "══════ Bridge Battle Help ══════");
-        p.sendMessage(ChatColor.YELLOW + "/bridge join" + ChatColor.WHITE + " - Join the game");
-        p.sendMessage(ChatColor.YELLOW + "/bridge leave" + ChatColor.WHITE + " - Leave the game");
-        p.sendMessage(ChatColor.YELLOW + "/bridge top" + ChatColor.WHITE + " - Show top killers");
-        p.sendMessage(ChatColor.YELLOW + "/b" + ChatColor.WHITE + " - Quick join");
-        if (p.hasPermission("bridge.admin")) {
-            p.sendMessage(ChatColor.YELLOW + "/bridge start" + ChatColor.WHITE + " - Force start");
-            p.sendMessage(ChatColor.YELLOW + "/bridge end" + ChatColor.WHITE + " - Force end");
-            p.sendMessage(ChatColor.YELLOW + "/bridge setspawn <lobby|red|blue>" + ChatColor.WHITE + " - Set spawns");
-            p.sendMessage(ChatColor.YELLOW + "/bridge setbridgezone <min|max>" + ChatColor.WHITE + " - Set bridge area");
+    // ==================== SCOREBOARD ====================
+
+    public void updateScoreboard() {
+        for (Player p : Bukkit.getOnlinePlayers()) {
+            updateScoreboard(p);
         }
-        p.sendMessage(ChatColor.GOLD + "═══════════════════════════════");
+    }
+
+    public void updateScoreboard(Player player) {
+        Scoreboard board = Bukkit.getScoreboardManager().getNewScoreboard();
+        Objective obj = board.registerNewObjective("bridge", "dummy", "§6§l⚔ BRIDGE BATTLE ⚔");
+        obj.setDisplaySlot(DisplaySlot.SIDEBAR);
+
+        obj.getScore("§fRound: §b" + (gameState == GameState.WAITING ? "0" : currentRound) + "/2").setScore(10);
+        obj.getScore("§fTime: §e" + formatMatchTime(matchSeconds)).setScore(9);
+        obj.getScore("§7 ").setScore(8);
+        obj.getScore("§cRed Score: §f" + redScore).setScore(7);
+        obj.getScore("§bBlue Score: §f" + blueScore).setScore(6);
+
+        String status = switch (gameState) {
+            case WAITING -> "§eWaiting...";
+            case COUNTDOWN -> "§6Start: " + countdownSeconds + "s";
+            case ACTIVE -> "§a§lLIVE!";
+            default -> "§7---";
+        };
+        obj.getScore("§8 ").setScore(5);
+        obj.getScore("§fStatus: " + status).setScore(4);
+        obj.getScore("§9 ").setScore(3);
+        obj.getScore("§eplay.unknownrealm.com").setScore(2);
+
+        player.setScoreboard(board);
+    }
+
+    // ==================== CONFIG LOGIC ====================
+
+    private void loadSpawns() {
+        lobbySpawn = loadLoc("lobby");
+        redSpawn = loadLoc("red");
+        blueSpawn = loadLoc("blue");
+    }
+
+    private Location loadLoc(String path) {
+        FileConfiguration c = getConfig();
+        if (!c.contains("spawns." + path)) return null;
+        World w = Bukkit.getWorld(c.getString("spawns." + path + ".world"));
+        if (w == null) return null;
+        return new Location(w, c.getDouble("spawns."+path+".x"), c.getDouble("spawns."+path+".y"), c.getDouble("spawns."+path+".z"));
+    }
+
+    public void setSpawn(String type, Location loc) {
+        FileConfiguration c = getConfig();
+        c.set("spawns."+type+".world", loc.getWorld().getName());
+        c.set("spawns."+type+".x", loc.getX());
+        c.set("spawns."+type+".y", loc.getY());
+        c.set("spawns."+type+".z", loc.getZ());
+        saveConfig();
+        loadSpawns();
+    }
+
+    private void loadBridgeZone() {
+        FileConfiguration c = getConfig();
+        if (!c.contains("bridge_zone")) return;
+        World w = Bukkit.getWorld(c.getString("bridge_zone.world"));
+        if (w == null) return;
+        bridgeZoneMin = new Location(w, c.getDouble("bridge_zone.min.x"), c.getDouble("bridge_zone.min.y"), c.getDouble("bridge_zone.min.z"));
+        bridgeZoneMax = new Location(w, c.getDouble("bridge_zone.max.x"), c.getDouble("bridge_zone.max.y"), c.getDouble("bridge_zone.max.z"));
+    }
+
+    private void setBridgeZone(Player p, String type) {
+        FileConfiguration c = getConfig();
+        c.set("bridge_zone.world", p.getWorld().getName());
+        c.set("bridge_zone."+type+".x", p.getLocation().getX());
+        c.set("bridge_zone."+type+".y", p.getLocation().getY());
+        c.set("bridge_zone."+type+".z", p.getLocation().getZ());
+        saveConfig();
+        loadBridgeZone();
+        p.sendMessage("§aBridge zone " + type + " set!");
+    }
+
+    private void loadChests() {
+        chestLocations.clear();
+        for (int i = 1; i <= 3; i++) {
+            if (getConfig().contains("chests.c" + i)) {
+                World w = Bukkit.getWorld(getConfig().getString("chests.c" + i + ".world"));
+                if (w != null) {
+                    chestLocations.add(new Location(w, getConfig().getDouble("chests.c"+i+".x"), getConfig().getDouble("chests.c"+i+".y"), getConfig().getDouble("chests.c"+i+".z")));
+                }
+            }
+        }
+    }
+
+    public void setGameChest(int id, Location loc) {
+        getConfig().set("chests.c"+id+".world", loc.getWorld().getName());
+        getConfig().set("chests.c"+id+".x", loc.getBlockX());
+        getConfig().set("chests.c"+id+".y", loc.getBlockY());
+        getConfig().set("chests.c"+id+".z", loc.getBlockZ());
+        saveConfig();
+        loadChests();
+    }
+
+    // ==================== GENERATORS & HOLOGRAMS ====================
+
+    private void loadGenerators() {
+        goldGens = parseGen("gold");
+        diamondGens = parseGen("diamond");
+        emeraldGens = parseGen("emerald");
+    }
+
+    private List<Location> parseGen(String type) {
+        List<Location> locs = new ArrayList<>();
+        for (String s : getConfig().getStringList("generators." + type)) {
+            String[] p = s.split(",");
+            World w = Bukkit.getWorld(p[0]);
+            if (w != null) locs.add(new Location(w, Double.parseDouble(p[1]), Double.parseDouble(p[2]), Double.parseDouble(p[3])));
+        }
+        return locs;
+    }
+
+    private void setupGenerator(Player p, String type) {
+        Location loc = p.getLocation().getBlock().getLocation();
+        List<String> list = getConfig().getStringList("generators." + type);
+        list.add(loc.getWorld().getName() + "," + loc.getX() + "," + loc.getY() + "," + loc.getZ());
+        getConfig().set("generators." + type, list);
+        saveConfig();
+        loadGenerators();
+        refreshHolograms();
+        p.sendMessage("§a" + type.toUpperCase() + " generator set!");
+    }
+
+    public void removeNearestGenerator(Player p) {
+        Location pLoc = p.getLocation();
+        Location toRem = null;
+        String type = "";
+        double best = 3.0;
+
+        for (String t : Arrays.asList("gold", "diamond", "emerald")) {
+            for (Location l : parseGen(t)) {
+                if (l.distance(pLoc) < best) {
+                    best = l.distance(pLoc);
+                    toRem = l;
+                    type = t;
+                }
+            }
+        }
+
+        if (toRem != null) {
+            List<String> list = getConfig().getStringList("generators." + type);
+            list.remove(toRem.getWorld().getName() + "," + toRem.getX() + "," + toRem.getY() + "," + toRem.getZ());
+            getConfig().set("generators." + type, list);
+            saveConfig();
+            loadGenerators();
+            refreshHolograms();
+            p.sendMessage("§cRemoved nearest " + type.toUpperCase() + " generator.");
+        } else {
+            p.sendMessage("§cNo generator found nearby.");
+        }
+    }
+
+    public void refreshHolograms() {
+        for (ArmorStand holo : genHolograms.values()) holo.remove();
+        genHolograms.clear();
+        for (Location loc : goldGens) createGenHologram(loc, Material.GOLD_INGOT, "§6§lGOLD");
+        for (Location loc : diamondGens) createGenHologram(loc, Material.DIAMOND, "§b§lDIAMOND");
+        for (Location loc : emeraldGens) createGenHologram(loc, Material.EMERALD, "§a§lEMERALD");
+    }
+
+    public void createGenHologram(Location loc, Material mat, String name) {
+        ArmorStand holo = loc.getWorld().spawn(loc.clone().add(0.5, 1.2, 0.5), ArmorStand.class);
+        holo.setVisible(false);
+        holo.setMarker(true);
+        holo.setGravity(false);
+        holo.setCustomName(name + " §f§lGENERATOR");
+        holo.setCustomNameVisible(true);
+        if (holo.getEquipment() != null) holo.getEquipment().setHelmet(new ItemStack(mat));
+        genHolograms.put(loc, holo);
+    }
+
+    public void startGenerators() {
+        new BukkitRunnable() {
+            int ticks = 0;
+            @Override
+            public void run() {
+                if (gameState != GameState.ACTIVE) return;
+                ticks += 20;
+
+                // Gold (1s), Diamond (30s), Emerald (60s)
+                spawnAt(goldGens, Material.GOLD_INGOT, ticks, 20);
+                spawnAt(diamondGens, Material.DIAMOND, ticks, 600);
+                spawnAt(emeraldGens, Material.EMERALD, ticks, 1200);
+            }
+        }.runTaskTimer(this, 0L, 20L);
+    }
+
+    private void spawnAt(List<Location> locs, Material mat, int ticks, int interval) {
+        if (ticks % interval != 0) return;
+        for (Location loc : locs) {
+            loc.getWorld().dropItemNaturally(loc.clone().add(0.5, 1, 0.5), new ItemStack(mat));
+        }
     }
 }

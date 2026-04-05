@@ -2,18 +2,12 @@ package org.minigame.minigame;
 
 import org.bukkit.*;
 import org.bukkit.block.Block;
-import org.bukkit.entity.Arrow;
-import org.bukkit.entity.Player;
-import org.bukkit.entity.Snowball;
-import org.bukkit.entity.Villager;
+import org.bukkit.entity.*;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
-import org.bukkit.event.entity.EntityDamageByEntityEvent;
-import org.bukkit.event.entity.EntityDamageEvent;
-import org.bukkit.event.entity.FoodLevelChangeEvent;
-import org.bukkit.event.entity.ProjectileHitEvent;
+import org.bukkit.event.entity.*;
 import org.bukkit.event.player.*;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
@@ -61,31 +55,58 @@ public class GameListener implements Listener {
     }
 
     @EventHandler
-    public void onBlockPlace(BlockPlaceEvent event) {
+    public void onBlockPlace(BlockPlaceEvent e) {
         BridgeBattle plugin = BridgeBattle.getInstance();
-        Player p = event.getPlayer();
+        Player p = e.getPlayer();
 
-        // ADMINS BYPASS ALL RULES
         if (p.hasPermission("bridge.admin") && p.getGameMode() == GameMode.CREATIVE) return;
 
-        // 1. Only allow placing during active game
-        if (plugin.getGameState() != BridgeBattle.GameState.ACTIVE) {
-            event.setCancelled(true);
-            p.sendMessage(ChatColor.RED + "Game not active!");
+        // Fix: Allow all wool types (Red/Blue/White)
+        if (!e.getBlock().getType().name().contains("WOOL")) {
+            e.setCancelled(true);
+            p.sendMessage("§cYou can only place wool!");
             return;
         }
 
-        // 2. Only allow white wool
-        if (event.getBlock().getType() != Material.WHITE_WOOL) {
-            event.setCancelled(true);
-            p.sendMessage(ChatColor.RED + "You can only place white wool!");
-            return;
+        if (plugin.getGameState() == BridgeBattle.GameState.ACTIVE) {
+            plugin.getPlayerPlacedBlocks().add(e.getBlock().getLocation());
         }
+    }
 
-        // 3. Check if in bridge zone
-        if (!plugin.isInBridgeZone(event.getBlock().getLocation())) {
-            event.setCancelled(true);
-            p.sendMessage(ChatColor.RED + "You can only place blocks in the bridge zone!");
+    @EventHandler
+    public void onDrop(PlayerDropItemEvent e) {
+        Material mat = e.getItemDrop().getItemStack().getType();
+        // Prevent dropping weapons
+        if (mat == Material.BOW || mat == Material.IRON_SWORD || mat == Material.FISHING_ROD) {
+            e.setCancelled(true);
+            e.getPlayer().sendMessage("§cYou cannot drop your gear!");
+        }
+    }
+
+    @EventHandler
+    public void onSpecialWeapon(PlayerInteractEvent e) {
+        if (!e.getAction().name().contains("RIGHT_CLICK")) return;
+        ItemStack item = e.getItem();
+        if (item == null) return;
+
+        // Fireball Logic
+        if (item.getType() == Material.FIRE_CHARGE) {
+            e.setCancelled(true);
+            Fireball f = e.getPlayer().launchProjectile(Fireball.class);
+            f.setYield(2.5f);
+            f.setIsIncendiary(false);
+            item.setAmount(item.getAmount() - 1);
+        }
+    }
+
+    @EventHandler
+    public void onTNTFishing(PlayerFishEvent e) {
+        // When the hook hits something, spawn TNT
+        if (e.getState() == PlayerFishEvent.State.IN_GROUND || e.getState() == PlayerFishEvent.State.CAUGHT_ENTITY) {
+            Location loc = e.getHook().getLocation();
+            TNTPrimed tnt = loc.getWorld().spawn(loc, TNTPrimed.class);
+            tnt.setFuseTicks(30);
+            e.getHook().remove();
         }
     }
 
@@ -94,7 +115,7 @@ public class GameListener implements Listener {
         BridgeBattle plugin = BridgeBattle.getInstance();
         Player p = event.getPlayer();
 
-        // ADMINS BYPASS ALL RULES
+        // Admins in Creative bypass all checks
         if (p.hasPermission("bridge.admin") && p.getGameMode() == GameMode.CREATIVE) return;
 
         if (plugin.getGameState() != BridgeBattle.GameState.ACTIVE) {
@@ -102,15 +123,22 @@ public class GameListener implements Listener {
             return;
         }
 
-        if (event.getBlock().getType() != Material.WHITE_WOOL) {
-            event.setCancelled(true);
-            p.sendMessage(ChatColor.RED + "You can only break white wool!");
-            return;
-        }
+        Material type = event.getBlock().getType();
+        if (type.name().contains("WOOL")) {
+            BridgeBattle.Team playerTeam = plugin.getPlayerTeam(p);
 
-        if (!plugin.isInBridgeZone(event.getBlock().getLocation())) {
-            event.setCancelled(true);
-            p.sendMessage(ChatColor.RED + "You can only break blocks in the bridge zone!");
+            // Logic: You can ONLY break wool that matches your team color
+            boolean isOwnTeamWool = (playerTeam == BridgeBattle.Team.RED && type == Material.RED_WOOL) ||
+                    (playerTeam == BridgeBattle.Team.BLUE && type == Material.BLUE_WOOL);
+
+            if (!isOwnTeamWool) {
+                event.setCancelled(true);
+                p.sendMessage("§cYou can only break your own team's wool by hand!");
+                return;
+            }
+
+            // Remove from tracking if successful
+            plugin.getPlayerPlacedBlocks().remove(event.getBlock().getLocation());
         }
     }
 
@@ -299,46 +327,134 @@ public class GameListener implements Listener {
 
     @EventHandler
     public void onArrowHit(ProjectileHitEvent e) {
-        if (!(e.getEntity() instanceof Arrow)) return;
-        Arrow arrow = (Arrow) e.getEntity();
-        if (!(arrow.getShooter() instanceof Player)) return;
+        if (!(e.getEntity() instanceof Arrow arrow)) return;
+        if (!(arrow.getShooter() instanceof Player shooter)) return;
 
-        Player shooter = (Player) arrow.getShooter();
         Block hitBlock = e.getHitBlock();
+        if (hitBlock == null || !hitBlock.getType().name().contains("WOOL")) return;
 
-        if (hitBlock != null && hitBlock.getType() == Material.WHITE_WOOL) {
-            // Basic Level 1: Destroy the hit block
-            hitBlock.setType(Material.AIR);
-            hitBlock.getWorld().playEffect(hitBlock.getLocation(), Effect.STEP_SOUND, Material.WHITE_WOOL);
+        BridgeBattle plugin = BridgeBattle.getInstance();
+        BridgeBattle.Team shooterTeam = plugin.getPlayerTeam(shooter);
+        Material blockType = hitBlock.getType();
 
-            // Level 2/3 Upgrade: Check if player has the "Explosive" upgrade
-            // We assume you store this in a Map<Player, Integer> bowUpgradeLevel;
-            int level = BridgeBattle.getInstance().getBowLevel(shooter);
+        // PROTECTION: Arrows ONLY break the OPPOSITE team's wool
+        boolean isEnemyWool = (shooterTeam == BridgeBattle.Team.RED && blockType == Material.BLUE_WOOL) ||
+                (shooterTeam == BridgeBattle.Team.BLUE && blockType == Material.RED_WOOL);
 
-            if (level >= 2) {
-                // Destroy nearby 2 blocks (3x3 area)
-                for (int x = -1; x <= 1; x++) {
-                    for (int y = -1; y <= 1; y++) {
-                        for (int z = -1; z <= 1; z++) {
-                            Block b = hitBlock.getRelative(x, y, z);
-                            if (b.getType() == Material.WHITE_WOOL) {
-                                b.setType(Material.AIR);
-                            }
+        if (!isEnemyWool) {
+            arrow.remove();
+            return; // Arrow does nothing to your own team's blocks
+        }
+
+        // BREAK LOGIC (3x3 for Level 2+)
+        int level = plugin.getBowLevel(shooter);
+        if (level == 1) {
+            breakBridgeBlock(hitBlock, plugin);
+        } else {
+            for (int x = -1; x <= 1; x++) {
+                for (int y = -1; y <= 1; y++) {
+                    for (int z = -1; z <= 1; z++) {
+                        Block rel = hitBlock.getRelative(x, y, z);
+                        if (rel.getType().name().contains("WOOL")) {
+                            breakBridgeBlock(rel, plugin);
                         }
                     }
                 }
             }
         }
-        arrow.remove(); // Remove arrow after impact
+        arrow.remove();
+    }
+
+    @EventHandler
+    public void onArrowHitPlayer(EntityDamageByEntityEvent e) {
+        if (!(e.getDamager() instanceof Arrow arrow)) return;
+        if (!(e.getEntity() instanceof Player victim)) return;
+        if (!(arrow.getShooter() instanceof Player shooter)) return;
+
+        BridgeBattle plugin = BridgeBattle.getInstance();
+
+        // Friendly Fire Check
+        if (plugin.getPlayerTeam(victim) == plugin.getPlayerTeam(shooter)) {
+            e.setCancelled(true);
+            return;
+        }
+
+        // Apply Knockback (Punch Effect)
+        Vector direction = arrow.getLocation().getDirection().normalize().multiply(1.5);
+        direction.setY(0.4); // Give a slight upward lift to help them clear the edge
+        victim.setVelocity(direction);
+
+        shooter.sendMessage("§aDirect Hit on " + victim.getName() + "!");
+    }
+
+    @EventHandler
+    public void onPlayerRespawn(PlayerRespawnEvent e) {
+        BridgeBattle plugin = BridgeBattle.getInstance();
+        Player p = e.getPlayer();
+        BridgeBattle.Team team = plugin.getPlayerTeam(p);
+
+        if (plugin.getGameState() == BridgeBattle.GameState.ACTIVE) {
+            Location spawn = (team == BridgeBattle.Team.RED) ? plugin.getSpawn("red") : plugin.getSpawn("blue");
+            if (spawn != null) e.setRespawnLocation(spawn);
+
+            // Give base armor back after delay
+            Bukkit.getScheduler().runTaskLater(plugin, () -> plugin.giveGameItems(p), 5L);
+        } else {
+            if (plugin.getSpawn("lobby") != null) e.setRespawnLocation(plugin.getSpawn("lobby"));
+        }
+    }
+
+    // Helper method to keep code clean
+    private void breakBridgeBlock(Block block, BridgeBattle plugin) {
+        block.setType(Material.AIR);
+        block.getWorld().playEffect(block.getLocation(), Effect.STEP_SOUND, Material.WHITE_WOOL);
+        // Optional: If you track breaks, remove from map here too
+        plugin.getPlayerPlacedBlocks().remove(block.getLocation());
     }
 
     @EventHandler
     public void onNPCInteract(PlayerInteractEntityEvent e) {
-        if (e.getRightClicked() instanceof Villager) {
-            Villager v = (Villager) e.getRightClicked();
-            if (v.getCustomName() != null && v.getCustomName().contains("GAME SHOP")) {
+        if (!(e.getRightClicked() instanceof Villager v)) return;
+        if (v.getCustomName() == null || !v.getCustomName().contains("SHOP")) return;
+
+        e.setCancelled(true);
+        if (BridgeBattle.getInstance().getGameState() != BridgeBattle.GameState.ACTIVE) {
+            e.getPlayer().sendMessage("§cThe shop is closed until the game starts!");
+            return;
+        }
+        new GameShop().openMainMenu(e.getPlayer());
+    }
+
+    @EventHandler
+    public void onArrowPickup(PlayerPickupArrowEvent e) {
+        // Simply cancel the event so arrows on the ground stay there or disappear
+        e.setCancelled(true);
+    }
+
+    // Alternatively, to keep the ground clean, we can set the metadata on spawn
+    @EventHandler
+    public void onShoot(EntityShootBowEvent e) {
+        if (e.getProjectile() instanceof Arrow arrow) {
+            // This prevents the arrow from being picked up by anyone
+            arrow.setPickupStatus(AbstractArrow.PickupStatus.DISALLOWED);
+        }
+    }
+
+    @EventHandler
+    public void onNPCDamage(EntityDamageEvent e) {
+        if (e.getEntity() instanceof Villager villager) {
+            // Check if it's our shop NPC by name
+            if (villager.getCustomName() != null && villager.getCustomName().contains("GAME SHOP")) {
                 e.setCancelled(true);
-                new GameShop().openMainMenu(e.getPlayer());
+            }
+        }
+    }
+
+    @EventHandler
+    public void onNPCHit(EntityDamageByEntityEvent e) {
+        if (e.getEntity() instanceof Villager villager) {
+            if (villager.getCustomName() != null && villager.getCustomName().contains("GAME SHOP")) {
+                e.setCancelled(true);
             }
         }
     }
