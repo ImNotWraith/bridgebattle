@@ -1,5 +1,12 @@
-# BridgeBattle Configuration
-# Spawn locations are saved here automatically
+# Bridge Battle Configuration
+
+game:
+  min-players: 2
+  max-players: 6
+  players-per-team: 3
+  round-time-seconds: 180
+  rounds-to-win: 3
+  countdown-seconds: 10
 
 spawns:
   lobby:
@@ -9,17 +16,28 @@ spawns:
     z: 0.0
     yaw: 0.0
     pitch: 0.0
-  team1:
+  red:
     world: "world"
     x: 100.0
     y: 64.0
-    z: 100.0
-    yaw: 0.0
+    z: 0.0
+    yaw: 90.0
     pitch: 0.0
-  team2:
+  blue:
     world: "world"
     x: -100.0
     y: 64.0
-    z: -100.0
-    yaw: 0.0
+    z: 0.0
+    yaw: -90.0
     pitch: 0.0
+
+bridge_zone:
+  world: "world"
+  min:
+    x: -50.0
+    y: 64.0
+    z: -10.0
+  max:
+    x: 50.0
+    y: 68.0
+    z: 10.0

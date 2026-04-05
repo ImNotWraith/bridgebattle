@@ -1,27 +1,15 @@
 name: BridgeBattle
-version: 1.0
+version: 2.0
 main: org.minigame.minigame.BridgeBattle
 api-version: "1.20"
 
 commands:
-  setspawnteam:
-    description: Set team spawn location
-    usage: /setspawnteam <1|2>
-  minigamespawn:
-    description: Set lobby spawn location
-    usage: /minigamespawn
-  endgame:
-    description: End current game
-    usage: /endgame
-  join:
-    description: Join the queue
-    usage: /join
-  leave:
-    description: Leave queue or team
-    usage: /leave
-  team:
-    description: Join or leave a team
-    usage: /team <red|blue|leave>
+  bridge:
+    description: Main Bridge Battle command
+    usage: /bridge <join|leave|start|end|setspawn|setbridgezone|top>
+  b:
+    description: Quick join command
+    usage: /b
 
 permissions:
   bridge.admin:

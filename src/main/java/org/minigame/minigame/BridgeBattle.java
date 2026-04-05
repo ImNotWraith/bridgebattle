@@ -9,6 +9,7 @@ import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitRunnable;
+import org.bukkit.scoreboard.*;
 
 import java.util.*;
 
@@ -16,19 +17,35 @@ public class BridgeBattle extends JavaPlugin {
 
     private static BridgeBattle instance;
 
-    // Game data
-    private List<Player> teamRed = new ArrayList<>();
-    private List<Player> teamBlue = new ArrayList<>();
-    private List<Player> waitingQueue = new ArrayList<>();
-    private Map<Player, String> playerTeam = new HashMap<>();
-    private boolean gameRunning = false;
+    // Game states
+    public enum GameState {
+        WAITING, COUNTDOWN, ACTIVE, ENDING
+    }
+
+    public enum Team {
+        RED, BLUE, NONE
+    }
+
+    private GameState gameState = GameState.WAITING;
+
+    // Teams
+    private List<Player> redTeam = new ArrayList<>();
+    private List<Player> blueTeam = new ArrayList<>();
+    private Map<Player, Team> playerTeam = new HashMap<>();
+    private Map<Player, Integer> playerKills = new HashMap<>();
+
+    // Game stats
     private int redScore = 0;
     private int blueScore = 0;
+    private int roundTimeLeft = 180;
+    private BukkitRunnable gameTimer;
+    private BukkitRunnable countdownTimer;
+    private int countdownSeconds = 10;
 
     // Spawn locations
     private Location lobbySpawn;
-    private Location team1Spawn;
-    private Location team2Spawn;
+    private Location redSpawn;
+    private Location blueSpawn;
 
     // Bridge zone
     private Location bridgeZoneMin;
@@ -39,23 +56,17 @@ public class BridgeBattle extends JavaPlugin {
         instance = this;
         saveDefaultConfig();
         loadSpawns();
+        loadBridgeZone();
 
-        getServer().getPluginManager().registerEvents(new GameListeners(this), this);
+        // Register events
+        getServer().getPluginManager().registerEvents(new GameListener(), this);
 
-        // Register commands
-        Objects.requireNonNull(getCommand("setspawnteam")).setExecutor(this);
-        Objects.requireNonNull(getCommand("minigamespawn")).setExecutor(this);
-        Objects.requireNonNull(getCommand("endgame")).setExecutor(this);
-        Objects.requireNonNull(getCommand("join")).setExecutor(this);
-        Objects.requireNonNull(getCommand("leave")).setExecutor(this);
-        Objects.requireNonNull(getCommand("team")).setExecutor(this);
-
-        getLogger().info("§aBridgeBattle enabled!");
+        getLogger().info(ChatColor.GREEN + "BridgeBattle enabled!");
     }
 
     @Override
     public void onDisable() {
-        getLogger().info("§cBridgeBattle disabled!");
+        getLogger().info(ChatColor.RED + "BridgeBattle disabled!");
     }
 
     public static BridgeBattle getInstance() {
@@ -67,10 +78,12 @@ public class BridgeBattle extends JavaPlugin {
     private void loadSpawns() {
         FileConfiguration config = getConfig();
         lobbySpawn = loadSpawn("lobby");
-        team1Spawn = loadSpawn("team1");
-        team2Spawn = loadSpawn("team2");
+        redSpawn = loadSpawn("red");
+        blueSpawn = loadSpawn("blue");
+    }
 
-        // Load bridge zone if exists
+    private void loadBridgeZone() {
+        FileConfiguration config = getConfig();
         if (config.contains("bridge_zone")) {
             World world = Bukkit.getWorld(config.getString("bridge_zone.world"));
             if (world != null) {
@@ -112,239 +125,402 @@ public class BridgeBattle extends JavaPlugin {
         saveConfig();
     }
 
-    public void setLobbySpawn(Location location) {
-        this.lobbySpawn = location;
-        saveSpawn("lobby", location);
-    }
-
-    public void setTeamSpawn(int team, Location location) {
-        if (team == 1) {
-            this.team1Spawn = location;
-            saveSpawn("team1", location);
-        } else if (team == 2) {
-            this.team2Spawn = location;
-            saveSpawn("team2", location);
+    public void setSpawn(String type, Location location) {
+        switch (type.toLowerCase()) {
+            case "lobby":
+                lobbySpawn = location;
+                saveSpawn("lobby", location);
+                break;
+            case "red":
+                redSpawn = location;
+                saveSpawn("red", location);
+                break;
+            case "blue":
+                blueSpawn = location;
+                saveSpawn("blue", location);
+                break;
         }
     }
 
-    public Location getLobbySpawn() { return lobbySpawn; }
-    public Location getTeamSpawn(int team) { return team == 1 ? team1Spawn : team2Spawn; }
-    public boolean isGameRunning() { return gameRunning; }
+    public Location getSpawn(String type) {
+        switch (type.toLowerCase()) {
+            case "lobby": return lobbySpawn;
+            case "red": return redSpawn;
+            case "blue": return blueSpawn;
+            default: return null;
+        }
+    }
+
+    public boolean isInBridgeZone(Location loc) {
+        if (bridgeZoneMin == null || bridgeZoneMax == null) return true;
+        return loc.getX() >= bridgeZoneMin.getX() && loc.getX() <= bridgeZoneMax.getX() &&
+                loc.getY() >= bridgeZoneMin.getY() && loc.getY() <= bridgeZoneMax.getY() &&
+                loc.getZ() >= bridgeZoneMin.getZ() && loc.getZ() <= bridgeZoneMax.getZ();
+    }
 
     // ==================== PLAYER MANAGEMENT ====================
 
-    public void giveNetherStar(Player player) {
-        ItemStack netherStar = new ItemStack(Material.NETHER_STAR, 1);
-        ItemMeta meta = netherStar.getItemMeta();
-        meta.setDisplayName(ChatColor.GOLD + "Join Game");
-        meta.setLore(Arrays.asList(ChatColor.GRAY + "Right click to join the queue!"));
-        netherStar.setItemMeta(meta);
-        player.getInventory().setItem(0, netherStar);
+    public void joinGame(Player player) {
+        if (gameState != GameState.WAITING) {
+            player.sendMessage(ChatColor.RED + "Game already in progress!");
+            return;
+        }
+
+        if (playerTeam.containsKey(player)) {
+            player.sendMessage(ChatColor.RED + "You're already in the game!");
+            return;
+        }
+
+        // Auto-balance teams
+        Team team = getSmallestTeam();
+
+        if (team == Team.RED) {
+            redTeam.add(player);
+            playerTeam.put(player, Team.RED);
+            playerKills.put(player, 0);
+            player.sendMessage(ChatColor.GREEN + "You joined the " + ChatColor.RED + "RED TEAM!");
+            if (redSpawn != null) player.teleport(redSpawn);
+        } else if (team == Team.BLUE) {
+            blueTeam.add(player);
+            playerTeam.put(player, Team.BLUE);
+            playerKills.put(player, 0);
+            player.sendMessage(ChatColor.GREEN + "You joined the " + ChatColor.BLUE + "BLUE TEAM!");
+            if (blueSpawn != null) player.teleport(blueSpawn);
+        } else {
+            player.sendMessage(ChatColor.RED + "Game is full!");
+            return;
+        }
+
+        // Give game items
+        giveGameItems(player);
+
+        // Update scoreboard
+        updateScoreboard();
+
+        // Broadcast
+        Bukkit.broadcastMessage(ChatColor.GREEN + player.getName() + " joined the game! (" + getTotalPlayers() + "/" + getConfig().getInt("game.max-players") + ")");
+
+        // Check if we can start
+        checkStartGame();
     }
 
-    public void giveBridgeItems(Player player) {
-        // Give bridge blocks
-        ItemStack bridgeBlocks = new ItemStack(Material.WHITE_WOOL, 64);
-        ItemMeta meta = bridgeBlocks.getItemMeta();
-        meta.setDisplayName(ChatColor.AQUA + "Bridge Blocks");
-        bridgeBlocks.setItemMeta(meta);
-        player.getInventory().setItem(1, bridgeBlocks);
+    public void leaveGame(Player player) {
+        Team team = playerTeam.get(player);
 
-        // Give snowballs for knockback
-        ItemStack snowballs = new ItemStack(Material.SNOWBALL, 16);
+        if (team == Team.RED) {
+            redTeam.remove(player);
+        } else if (team == Team.BLUE) {
+            blueTeam.remove(player);
+        }
+
+        playerTeam.remove(player);
+        playerKills.remove(player);
+
+        // Clear inventory
+        player.getInventory().clear();
+        player.getInventory().setArmorContents(null);
+
+        // Give lobby items
+        giveLobbyItems(player);
+
+        // Teleport to lobby
+        if (lobbySpawn != null) {
+            player.teleport(lobbySpawn);
+        }
+
+        player.sendMessage(ChatColor.YELLOW + "You left the game!");
+
+        // Update scoreboard for remaining players
+        for (Player p : getAllPlayers()) {
+            updateScoreboard(p);
+        }
+
+        // If game is active and teams become empty, end game
+        if (gameState == GameState.ACTIVE && (redTeam.isEmpty() || blueTeam.isEmpty())) {
+            endGame();
+        }
+
+        // If waiting and players left, cancel countdown
+        if (gameState == GameState.COUNTDOWN && getTotalPlayers() < getConfig().getInt("game.min-players")) {
+            cancelCountdown();
+        }
+    }
+
+    public void giveLobbyItems(Player player) {
+        player.getInventory().clear();
+
+        ItemStack joinItem = new ItemStack(Material.NETHER_STAR, 1);
+        ItemMeta meta = joinItem.getItemMeta();
+        meta.setDisplayName(ChatColor.GOLD + "Join Game");
+        meta.setLore(Arrays.asList(ChatColor.GRAY + "Right click to join the game!"));
+        joinItem.setItemMeta(meta);
+        player.getInventory().setItem(0, joinItem);
+    }
+
+    private Team getSmallestTeam() {
+        int maxPerTeam = getConfig().getInt("game.players-per-team", 3);
+        if (redTeam.size() < maxPerTeam && redTeam.size() <= blueTeam.size()) {
+            return Team.RED;
+        } else if (blueTeam.size() < maxPerTeam) {
+            return Team.BLUE;
+        }
+        return Team.NONE;
+    }
+
+    private int getTotalPlayers() {
+        return redTeam.size() + blueTeam.size();
+    }
+
+    private void checkStartGame() {
+        if (gameState != GameState.WAITING) return;
+
+        int total = getTotalPlayers();
+        int min = getConfig().getInt("game.min-players", 2);
+
+        if (total >= min) {
+            startCountdown();
+        }
+    }
+
+    // ==================== GAME START / COUNTDOWN ====================
+
+    private void startCountdown() {
+        gameState = GameState.COUNTDOWN;
+        countdownSeconds = getConfig().getInt("game.countdown-seconds", 10);
+
+        Bukkit.broadcastMessage(ChatColor.GREEN + "═══════════════════════════════");
+        Bukkit.broadcastMessage(ChatColor.GREEN + "  Enough players! Game starting!");
+        Bukkit.broadcastMessage(ChatColor.GREEN + "═══════════════════════════════");
+
+        countdownTimer = new BukkitRunnable() {
+            @Override
+            public void run() {
+                if (gameState != GameState.COUNTDOWN) {
+                    this.cancel();
+                    return;
+                }
+
+                if (countdownSeconds <= 0) {
+                    startGame();
+                    this.cancel();
+                    return;
+                }
+
+                if (countdownSeconds <= 10 || countdownSeconds % 5 == 0) {
+                    for (Player player : getAllPlayers()) {
+                        player.sendTitle(ChatColor.YELLOW + "" + countdownSeconds, "Get ready!", 0, 20, 0);
+                        player.playSound(player.getLocation(), Sound.UI_BUTTON_CLICK, 1.0f, 1.0f);
+                    }
+                    Bukkit.broadcastMessage(ChatColor.YELLOW + "Game starting in " + ChatColor.RED + countdownSeconds + ChatColor.YELLOW + " seconds!");
+                }
+
+                countdownSeconds--;
+            }
+        };
+
+        countdownTimer.runTaskTimer(this, 0L, 20L);
+    }
+
+    private void cancelCountdown() {
+        if (countdownTimer != null) {
+            countdownTimer.cancel();
+        }
+        gameState = GameState.WAITING;
+        Bukkit.broadcastMessage(ChatColor.RED + "Game start cancelled - not enough players!");
+    }
+
+    private void startGame() {
+        gameState = GameState.ACTIVE;
+        roundTimeLeft = getConfig().getInt("game.round-time-seconds", 180);
+
+        // Teleport players to team spawns and give items
+        for (Player player : redTeam) {
+            if (redSpawn != null) player.teleport(redSpawn);
+            giveGameItems(player);
+            player.sendTitle(ChatColor.RED + "GAME START!", "Build the bridge!", 10, 60, 20);
+            player.playSound(player.getLocation(), Sound.ENTITY_PLAYER_LEVELUP, 1.0f, 1.0f);
+        }
+
+        for (Player player : blueTeam) {
+            if (blueSpawn != null) player.teleport(blueSpawn);
+            giveGameItems(player);
+            player.sendTitle(ChatColor.BLUE + "GAME START!", "Build the bridge!", 10, 60, 20);
+            player.playSound(player.getLocation(), Sound.ENTITY_PLAYER_LEVELUP, 1.0f, 1.0f);
+        }
+
+        // Start game timer
+        startGameTimer();
+
+        // Update scoreboard
+        for (Player player : getAllPlayers()) {
+            updateScoreboard(player);
+        }
+
+        // Broadcast start message
+        Bukkit.broadcastMessage(ChatColor.GREEN + "═══════════════════════════════");
+        Bukkit.broadcastMessage(ChatColor.GREEN + "  GAME STARTED!");
+        Bukkit.broadcastMessage(ChatColor.RED + "  RED: " + redTeam.size() + ChatColor.GREEN + " vs " + ChatColor.BLUE + blueTeam.size());
+        Bukkit.broadcastMessage(ChatColor.GREEN + "═══════════════════════════════");
+    }
+
+    private void startGameTimer() {
+        gameTimer = new BukkitRunnable() {
+            @Override
+            public void run() {
+                if (gameState != GameState.ACTIVE) {
+                    this.cancel();
+                    return;
+                }
+
+                if (roundTimeLeft <= 0) {
+                    roundTimeUp();
+                    this.cancel();
+                    return;
+                }
+
+                // Update action bar every second
+                for (Player player : getAllPlayers()) {
+                    player.sendActionBar(ChatColor.GOLD + "Time: " + formatTime(roundTimeLeft) +
+                            ChatColor.WHITE + " | " + ChatColor.RED + redScore + ChatColor.WHITE + " - " +
+                            ChatColor.BLUE + blueScore);
+                }
+
+                roundTimeLeft--;
+            }
+        };
+        gameTimer.runTaskTimer(this, 0L, 20L);
+    }
+
+    private String formatTime(int seconds) {
+        int minutes = seconds / 60;
+        int secs = seconds % 60;
+        return String.format("%d:%02d", minutes, secs);
+    }
+
+    private void roundTimeUp() {
+        Bukkit.broadcastMessage(ChatColor.YELLOW + "Time's up! Round ended!");
+        resetRound();
+    }
+
+    // ==================== GAME ITEMS ====================
+
+    private void giveGameItems(Player player) {
+        player.getInventory().clear();
+        player.getInventory().setArmorContents(null);
+
+        // Bridge blocks
+        ItemStack blocks = new ItemStack(Material.WHITE_WOOL, 64);
+        ItemMeta blockMeta = blocks.getItemMeta();
+        blockMeta.setDisplayName(ChatColor.AQUA + "Bridge Blocks");
+        blocks.setItemMeta(blockMeta);
+        player.getInventory().setItem(1, blocks);
+
+        // Snowballs
+        ItemStack snowballs = new ItemStack(Material.SNOWBALL, 32);
         ItemMeta snowMeta = snowballs.getItemMeta();
         snowMeta.setDisplayName(ChatColor.WHITE + "Knockback Snowball");
         snowballs.setItemMeta(snowMeta);
         player.getInventory().setItem(2, snowballs);
 
-        // Give knockback sword
+        // Knockback sword
         ItemStack sword = new ItemStack(Material.WOODEN_SWORD, 1);
         ItemMeta swordMeta = sword.getItemMeta();
-        swordMeta.setDisplayName(ChatColor.GOLD + "Knockback Stick");
+        swordMeta.setDisplayName(ChatColor.GOLD + "Knockback Sword");
         swordMeta.setUnbreakable(true);
         sword.setItemMeta(swordMeta);
         player.getInventory().setItem(0, sword);
-    }
 
-    public void joinQueue(Player player) {
-        if (gameRunning) {
-            player.sendMessage(ChatColor.RED + "Game is already running!");
-            return;
-        }
-        if (waitingQueue.contains(player) || playerTeam.containsKey(player)) {
-            player.sendMessage(ChatColor.RED + "You are already in the game!");
-            return;
-        }
-        waitingQueue.add(player);
-        player.sendMessage(ChatColor.GREEN + "You joined the queue! Waiting for players...");
-        broadcastQueueStatus();
-        checkAutoStart();
-    }
-
-    public void leaveQueue(Player player) {
-        if (waitingQueue.contains(player)) {
-            waitingQueue.remove(player);
-            player.sendMessage(ChatColor.YELLOW + "You left the queue.");
-        } else if (playerTeam.containsKey(player)) {
-            leaveTeam(player);
+        // Team armor
+        Team team = playerTeam.get(player);
+        if (team == Team.RED) {
+            player.getInventory().setHelmet(new ItemStack(Material.RED_WOOL));
         } else {
-            player.sendMessage(ChatColor.RED + "You are not in the queue or on a team!");
-        }
-        broadcastQueueStatus();
-    }
-
-    public void joinTeam(Player player, String team) {
-        if (gameRunning) {
-            player.sendMessage(ChatColor.RED + "Game already started!");
-            return;
-        }
-
-        if (team.equalsIgnoreCase("red") && teamRed.size() >= 3) {
-            player.sendMessage(ChatColor.RED + "Red team is full! (Max 3 players)");
-            return;
-        }
-        if (team.equalsIgnoreCase("blue") && teamBlue.size() >= 3) {
-            player.sendMessage(ChatColor.RED + "Blue team is full! (Max 3 players)");
-            return;
-        }
-
-        waitingQueue.remove(player);
-        if (playerTeam.containsKey(player)) leaveTeam(player);
-
-        if (team.equalsIgnoreCase("red")) {
-            teamRed.add(player);
-            playerTeam.put(player, "red");
-            player.sendMessage(ChatColor.RED + "You joined the Red Team!");
-            if (team1Spawn != null) player.teleport(team1Spawn);
-        } else if (team.equalsIgnoreCase("blue")) {
-            teamBlue.add(player);
-            playerTeam.put(player, "blue");
-            player.sendMessage(ChatColor.BLUE + "You joined the Blue Team!");
-            if (team2Spawn != null) player.teleport(team2Spawn);
-        }
-
-        giveTeamArmor(player, team);
-        broadcastTeamSizes();
-        broadcastQueueStatus();
-        checkAutoStart();
-    }
-
-    private void giveTeamArmor(Player player, String team) {
-        player.getInventory().setHelmet(new ItemStack(team.equals("red") ? Material.RED_WOOL : Material.BLUE_WOOL));
-    }
-
-    public void leaveTeam(Player player) {
-        if (!playerTeam.containsKey(player)) return;
-
-        String team = playerTeam.get(player);
-        if (team.equals("red")) teamRed.remove(player);
-        else teamBlue.remove(player);
-
-        playerTeam.remove(player);
-        player.getInventory().clear();
-        player.getInventory().setArmorContents(null);
-        player.sendMessage(ChatColor.YELLOW + "You left your team.");
-
-        if (lobbySpawn != null) player.teleport(lobbySpawn);
-        giveNetherStar(player);
-        broadcastTeamSizes();
-    }
-
-    private void broadcastTeamSizes() {
-        String message = ChatColor.GOLD + "╔══════════════════════════════╗\n" +
-                ChatColor.GOLD + "║     " + ChatColor.RED + "RED: " + teamRed.size() +
-                ChatColor.GOLD + "     vs     " + ChatColor.BLUE + "BLUE: " + teamBlue.size() +
-                ChatColor.GOLD + "     ║\n" +
-                ChatColor.GOLD + "╚══════════════════════════════╝";
-
-        for (Player player : Bukkit.getOnlinePlayers()) {
-            player.sendMessage(message);
+            player.getInventory().setHelmet(new ItemStack(Material.BLUE_WOOL));
         }
     }
 
-    private void broadcastQueueStatus() {
-        if (!waitingQueue.isEmpty()) {
-            String waiting = ChatColor.YELLOW + "Waiting: " + ChatColor.WHITE;
-            for (int i = 0; i < waitingQueue.size(); i++) {
-                waiting += waitingQueue.get(i).getName();
-                if (i < waitingQueue.size() - 1) waiting += ", ";
-            }
-            Bukkit.broadcastMessage(waiting);
+    // ==================== KILL MANAGEMENT ====================
+
+    public void addKill(Player player) {
+        int kills = playerKills.getOrDefault(player, 0) + 1;
+        playerKills.put(player, kills);
+
+        // Update scoreboard for all players
+        for (Player p : getAllPlayers()) {
+            updateScoreboard(p);
+        }
+
+        // Play sound
+        player.playSound(player.getLocation(), Sound.ENTITY_PLAYER_LEVELUP, 1.0f, 1.0f);
+    }
+
+    public int getKills(Player player) {
+        return playerKills.getOrDefault(player, 0);
+    }
+
+    // ==================== SCOREBOARD ====================
+
+    public void updateScoreboard() {
+        for (Player player : getAllPlayers()) {
+            updateScoreboard(player);
         }
     }
 
-    private void checkAutoStart() {
-        if (!gameRunning && teamRed.size() == teamBlue.size() && teamRed.size() >= 1 && teamRed.size() <= 3) {
-            startCountdown();
-        }
-    }
+    public void updateScoreboard(Player player) {
+        ScoreboardManager manager = Bukkit.getScoreboardManager();
+        Scoreboard board = manager.getNewScoreboard();
+        Objective obj = board.registerNewObjective("bridge", "dummy", ChatColor.GOLD + "⚔ Bridge Battle ⚔");
+        obj.setDisplaySlot(DisplaySlot.SIDEBAR);
 
-    private void startCountdown() {
-        new BukkitRunnable() {
-            int countdown = 5;
+        // Team scores
+        obj.getScore(ChatColor.RED + "Red Team: " + redScore).setScore(5);
+        obj.getScore(ChatColor.BLUE + "Blue Team: " + blueScore).setScore(4);
+        obj.getScore(ChatColor.GRAY + "─────────────").setScore(3);
 
-            @Override
-            public void run() {
-                if (teamRed.size() != teamBlue.size() || teamRed.size() == 0) {
-                    Bukkit.broadcastMessage(ChatColor.RED + "Game start cancelled - teams unbalanced!");
-                    this.cancel();
-                    return;
-                }
+        // Player kills
+        obj.getScore(ChatColor.YELLOW + "Top Kills:").setScore(2);
 
-                if (countdown <= 0) {
-                    startGame();
-                    this.cancel();
-                } else {
-                    Bukkit.broadcastMessage(ChatColor.YELLOW + "Game starting in " + ChatColor.RED + countdown + ChatColor.YELLOW + " seconds!");
-                    for (Player p : teamRed) {
-                        p.sendTitle(ChatColor.RED + "" + countdown, "Get ready!", 0, 20, 0);
-                    }
-                    for (Player p : teamBlue) {
-                        p.sendTitle(ChatColor.BLUE + "" + countdown, "Get ready!", 0, 20, 0);
-                    }
-                    countdown--;
-                }
-            }
-        }.runTaskTimer(this, 0L, 20L);
-    }
+        // Get top 3 killers
+        List<Map.Entry<Player, Integer>> sortedKills = new ArrayList<>(playerKills.entrySet());
+        sortedKills.sort((a, b) -> b.getValue().compareTo(a.getValue()));
 
-    private void startGame() {
-        gameRunning = true;
-
-        // Clear inventories and give game items
-        for (Player p : teamRed) {
-            p.getInventory().clear();
-            p.getInventory().setArmorContents(null);
-            giveBridgeItems(p);
-            p.sendTitle(ChatColor.RED + "GAME START!", "Build the bridge!", 10, 60, 20);
-            p.sendMessage(ChatColor.GREEN + "═══════════════════════════════");
-            p.sendMessage(ChatColor.GREEN + "  Build the bridge to the other side!");
-            p.sendMessage(ChatColor.GREEN + "  Use snowballs to knock enemies off!");
-            p.sendMessage(ChatColor.GREEN + "═══════════════════════════════");
+        int rank = 1;
+        for (int i = 0; i < Math.min(3, sortedKills.size()); i++) {
+            Map.Entry<Player, Integer> entry = sortedKills.get(i);
+            String name = entry.getKey().getName();
+            if (name.length() > 12) name = name.substring(0, 12);
+            obj.getScore(ChatColor.WHITE + "#" + rank + " " + name + ": " + entry.getValue()).setScore(2 - rank);
+            rank++;
         }
 
-        for (Player p : teamBlue) {
-            p.getInventory().clear();
-            p.getInventory().setArmorContents(null);
-            giveBridgeItems(p);
-            p.sendTitle(ChatColor.BLUE + "GAME START!", "Build the bridge!", 10, 60, 20);
-            p.sendMessage(ChatColor.GREEN + "═══════════════════════════════");
-            p.sendMessage(ChatColor.GREEN + "  Build the bridge to the other side!");
-            p.sendMessage(ChatColor.GREEN + "  Use snowballs to knock enemies off!");
-            p.sendMessage(ChatColor.GREEN + "═══════════════════════════════");
+        // Game state
+        String state = "";
+        switch (gameState) {
+            case WAITING:
+                state = ChatColor.YELLOW + "Waiting...";
+                break;
+            case COUNTDOWN:
+                state = ChatColor.YELLOW + "Starting: " + countdownSeconds;
+                break;
+            case ACTIVE:
+                state = ChatColor.GREEN + "LIVE!";
+                break;
+            case ENDING:
+                state = ChatColor.RED + "Ending...";
+                break;
         }
+        obj.getScore(ChatColor.GRAY + "─────────────").setScore(-1);
+        obj.getScore(ChatColor.AQUA + "Status: " + state).setScore(-2);
 
-        Bukkit.broadcastMessage(ChatColor.GREEN + "═══════════════════════════════");
-        Bukkit.broadcastMessage(ChatColor.GREEN + "  GAME STARTED! Red vs Blue!");
-        Bukkit.broadcastMessage(ChatColor.GREEN + "═══════════════════════════════");
+        player.setScoreboard(board);
     }
 
-    public void winGame(String team) {
-        if (!gameRunning) return;
+    // ==================== ROUND MANAGEMENT ====================
 
-        gameRunning = false;
+    public void winRound(Team team) {
+        if (gameState != GameState.ACTIVE) return;
 
-        if (team.equals("red")) {
+        if (team == Team.RED) {
             redScore++;
             Bukkit.broadcastMessage(ChatColor.RED + "═══════════════════════════════");
             Bukkit.broadcastMessage(ChatColor.RED + "  RED TEAM WINS THE ROUND!");
@@ -358,98 +534,138 @@ public class BridgeBattle extends JavaPlugin {
             Bukkit.broadcastMessage(ChatColor.BLUE + "═══════════════════════════════");
         }
 
-        // Check for overall winner
-        if (redScore >= 3) {
+        // Play win sound
+        for (Player player : getAllPlayers()) {
+            player.playSound(player.getLocation(), Sound.UI_TOAST_CHALLENGE_COMPLETE, 1.0f, 1.0f);
+        }
+
+        int roundsToWin = getConfig().getInt("game.rounds-to-win", 3);
+
+        if (redScore >= roundsToWin) {
             Bukkit.broadcastMessage(ChatColor.GOLD + "★★★★★★★★★★★★★★★★★★★★★★★");
             Bukkit.broadcastMessage(ChatColor.GOLD + "  RED TEAM WINS THE MATCH!");
             Bukkit.broadcastMessage(ChatColor.GOLD + "★★★★★★★★★★★★★★★★★★★★★★★");
-            redScore = 0;
-            blueScore = 0;
-        } else if (blueScore >= 3) {
+            endGame();
+        } else if (blueScore >= roundsToWin) {
             Bukkit.broadcastMessage(ChatColor.GOLD + "★★★★★★★★★★★★★★★★★★★★★★★");
             Bukkit.broadcastMessage(ChatColor.GOLD + "  BLUE TEAM WINS THE MATCH!");
             Bukkit.broadcastMessage(ChatColor.GOLD + "★★★★★★★★★★★★★★★★★★★★★★★");
-            redScore = 0;
-            blueScore = 0;
+            endGame();
+        } else {
+            // Reset round after delay
+            new BukkitRunnable() {
+                @Override
+                public void run() {
+                    resetRound();
+                }
+            }.runTaskLater(this, 80L);
         }
-
-        // Reset after delay
-        new BukkitRunnable() {
-            @Override
-            public void run() {
-                resetGame();
-            }
-        }.runTaskLater(this, 80L); // 4 seconds delay
     }
 
-    private void resetGame() {
-        // Clear bridge blocks (you can add bridge clearing logic here)
-
-        // Teleport players back and reset
-        for (Player p : teamRed) {
-            p.getInventory().clear();
-            p.getInventory().setArmorContents(null);
-            if (team1Spawn != null) p.teleport(team1Spawn);
-            giveNetherStar(p);
-            p.sendMessage(ChatColor.YELLOW + "Get ready for the next round!");
+    private void resetRound() {
+        // Clear all bridge blocks (scan and remove white wool in bridge zone)
+        if (bridgeZoneMin != null && bridgeZoneMax != null) {
+            for (int x = (int) bridgeZoneMin.getX(); x <= (int) bridgeZoneMax.getX(); x++) {
+                for (int y = (int) bridgeZoneMin.getY(); y <= (int) bridgeZoneMax.getY(); y++) {
+                    for (int z = (int) bridgeZoneMin.getZ(); z <= (int) bridgeZoneMax.getZ(); z++) {
+                        Location loc = new Location(bridgeZoneMin.getWorld(), x, y, z);
+                        if (loc.getBlock().getType() == Material.WHITE_WOOL) {
+                            loc.getBlock().setType(Material.AIR);
+                        }
+                    }
+                }
+            }
         }
 
-        for (Player p : teamBlue) {
-            p.getInventory().clear();
-            p.getInventory().setArmorContents(null);
-            if (team2Spawn != null) p.teleport(team2Spawn);
-            giveNetherStar(p);
-            p.sendMessage(ChatColor.YELLOW + "Get ready for the next round!");
+        // Reset player positions and inventory
+        for (Player player : redTeam) {
+            player.getInventory().clear();
+            player.getInventory().setArmorContents(null);
+            if (redSpawn != null) player.teleport(redSpawn);
+            player.setHealth(20);
+            player.setFoodLevel(20);
+            giveGameItems(player);
+            player.sendMessage(ChatColor.YELLOW + "Next round starting!");
         }
 
-        gameRunning = false;
+        for (Player player : blueTeam) {
+            player.getInventory().clear();
+            player.getInventory().setArmorContents(null);
+            if (blueSpawn != null) player.teleport(blueSpawn);
+            player.setHealth(20);
+            player.setFoodLevel(20);
+            giveGameItems(player);
+            player.sendMessage(ChatColor.YELLOW + "Next round starting!");
+        }
 
-        // Auto-start if teams are still balanced
-        checkAutoStart();
+        // Reset timer
+        if (gameTimer != null) gameTimer.cancel();
+        roundTimeLeft = getConfig().getInt("game.round-time-seconds", 180);
+        startGameTimer();
+
+        // Update scoreboard
+        updateScoreboard();
+
+        // Brief countdown for next round
+        new BukkitRunnable() {
+            int count = 5;
+            @Override
+            public void run() {
+                if (count <= 0) {
+                    Bukkit.broadcastMessage(ChatColor.GREEN + "Round started!");
+                    this.cancel();
+                    return;
+                }
+                for (Player player : getAllPlayers()) {
+                    player.sendTitle(ChatColor.YELLOW + "" + count, "Next round!", 0, 20, 0);
+                }
+                count--;
+            }
+        }.runTaskTimer(this, 0L, 20L);
     }
 
     public void endGame() {
-        gameRunning = false;
+        if (gameTimer != null) gameTimer.cancel();
+        if (countdownTimer != null) countdownTimer.cancel();
+
+        gameState = GameState.WAITING;
         redScore = 0;
         blueScore = 0;
 
-        for (Player p : teamRed) {
-            p.getInventory().clear();
-            p.getInventory().setArmorContents(null);
-            if (lobbySpawn != null) p.teleport(lobbySpawn);
-            p.sendMessage(ChatColor.YELLOW + "Game ended! Teleported to lobby.");
-            giveNetherStar(p);
+        for (Player player : getAllPlayers()) {
+            player.getInventory().clear();
+            player.getInventory().setArmorContents(null);
+            if (lobbySpawn != null) player.teleport(lobbySpawn);
+            giveLobbyItems(player);
+            player.sendMessage(ChatColor.YELLOW + "Game ended! Use /bridge join to play again!");
         }
 
-        for (Player p : teamBlue) {
-            p.getInventory().clear();
-            p.getInventory().setArmorContents(null);
-            if (lobbySpawn != null) p.teleport(lobbySpawn);
-            p.sendMessage(ChatColor.YELLOW + "Game ended! Teleported to lobby.");
-            giveNetherStar(p);
-        }
-
-        teamRed.clear();
-        teamBlue.clear();
+        redTeam.clear();
+        blueTeam.clear();
         playerTeam.clear();
-        waitingQueue.clear();
+        playerKills.clear();
 
-        for (Player p : Bukkit.getOnlinePlayers()) {
-            giveNetherStar(p);
+        // Update scoreboard for any remaining players
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            updateScoreboard(player);
         }
-
-        Bukkit.broadcastMessage(ChatColor.RED + "Game has been forcibly ended by an admin!");
     }
 
-    public String getPlayerTeam(Player player) {
-        return playerTeam.get(player);
+    // ==================== UTILITIES ====================
+
+    public List<Player> getAllPlayers() {
+        List<Player> all = new ArrayList<>();
+        all.addAll(redTeam);
+        all.addAll(blueTeam);
+        return all;
     }
 
-    public boolean isInBridgeZone(Location loc) {
-        if (bridgeZoneMin == null || bridgeZoneMax == null) return true; // Allow if not set
-        return loc.getX() >= bridgeZoneMin.getX() && loc.getX() <= bridgeZoneMax.getX() &&
-                loc.getY() >= bridgeZoneMin.getY() && loc.getY() <= bridgeZoneMax.getY() &&
-                loc.getZ() >= bridgeZoneMin.getZ() && loc.getZ() <= bridgeZoneMax.getZ();
+    public Team getPlayerTeam(Player player) {
+        return playerTeam.getOrDefault(player, Team.NONE);
+    }
+
+    public GameState getGameState() {
+        return gameState;
     }
 
     // ==================== COMMANDS ====================
@@ -463,47 +679,131 @@ public class BridgeBattle extends JavaPlugin {
 
         Player p = (Player) sender;
 
-        switch (command.getName().toLowerCase()) {
-            case "setspawnteam":
-                if (!p.hasPermission("bridge.admin")) { p.sendMessage(ChatColor.RED + "No permission!"); return true; }
-                if (args.length != 1) { p.sendMessage(ChatColor.RED + "Usage: /setspawnteam <1|2>"); return true; }
-                try {
-                    int team = Integer.parseInt(args[0]);
-                    if (team == 1 || team == 2) {
-                        setTeamSpawn(team, p.getLocation());
-                        p.sendMessage(ChatColor.GREEN + "Team " + team + " spawn set at your location!");
-                    }
-                } catch (NumberFormatException e) { p.sendMessage(ChatColor.RED + "Team must be 1 or 2!"); }
-                break;
+        if (command.getName().equalsIgnoreCase("b")) {
+            joinGame(p);
+            return true;
+        }
 
-            case "minigamespawn":
-                if (!p.hasPermission("bridge.admin")) { p.sendMessage(ChatColor.RED + "No permission!"); return true; }
-                setLobbySpawn(p.getLocation());
-                p.sendMessage(ChatColor.GREEN + "Lobby spawn set at your location!");
-                break;
+        if (args.length == 0) {
+            sendHelp(p);
+            return true;
+        }
 
-            case "endgame":
-                if (!p.hasPermission("bridge.admin")) { p.sendMessage(ChatColor.RED + "No permission!"); return true; }
-                endGame();
-                p.sendMessage(ChatColor.GREEN + "Game ended!");
-                break;
-
+        switch (args[0].toLowerCase()) {
             case "join":
-                joinQueue(p);
+                joinGame(p);
                 break;
 
             case "leave":
-                leaveQueue(p);
+                leaveGame(p);
                 break;
 
-            case "team":
-                if (args.length < 1) { p.sendMessage(ChatColor.RED + "Usage: /team <red|blue|leave>"); return true; }
-                if (args[0].equalsIgnoreCase("red")) joinTeam(p, "red");
-                else if (args[0].equalsIgnoreCase("blue")) joinTeam(p, "blue");
-                else if (args[0].equalsIgnoreCase("leave")) leaveTeam(p);
-                else p.sendMessage(ChatColor.RED + "Invalid! Use red, blue, or leave");
+            case "start":
+                if (!p.hasPermission("bridge.admin")) {
+                    p.sendMessage(ChatColor.RED + "No permission!");
+                    return true;
+                }
+                if (getTotalPlayers() >= 2) {
+                    if (countdownTimer != null) countdownTimer.cancel();
+                    startGame();
+                } else {
+                    p.sendMessage(ChatColor.RED + "Not enough players!");
+                }
+                break;
+
+            case "end":
+                if (!p.hasPermission("bridge.admin")) {
+                    p.sendMessage(ChatColor.RED + "No permission!");
+                    return true;
+                }
+                endGame();
+                break;
+
+            case "setspawn":
+                if (!p.hasPermission("bridge.admin")) {
+                    p.sendMessage(ChatColor.RED + "No permission!");
+                    return true;
+                }
+                if (args.length < 2) {
+                    p.sendMessage(ChatColor.RED + "Usage: /bridge setspawn <lobby|red|blue>");
+                    return true;
+                }
+                setSpawn(args[1], p.getLocation());
+                p.sendMessage(ChatColor.GREEN + "Spawn " + args[1] + " set!");
+                break;
+
+            case "setbridgezone":
+                if (!p.hasPermission("bridge.admin")) {
+                    p.sendMessage(ChatColor.RED + "No permission!");
+                    return true;
+                }
+                if (args.length < 2) {
+                    p.sendMessage(ChatColor.RED + "Usage: /bridge setbridgezone <min|max>");
+                    return true;
+                }
+                FileConfiguration config = getConfig();
+                World w = p.getWorld();
+                if (args[1].equalsIgnoreCase("min")) {
+                    config.set("bridge_zone.world", w.getName());
+                    config.set("bridge_zone.min.x", p.getLocation().getX());
+                    config.set("bridge_zone.min.y", p.getLocation().getY());
+                    config.set("bridge_zone.min.z", p.getLocation().getZ());
+                    p.sendMessage(ChatColor.GREEN + "Bridge zone MIN corner set!");
+                } else if (args[1].equalsIgnoreCase("max")) {
+                    config.set("bridge_zone.max.x", p.getLocation().getX());
+                    config.set("bridge_zone.max.y", p.getLocation().getY());
+                    config.set("bridge_zone.max.z", p.getLocation().getZ());
+                    p.sendMessage(ChatColor.GREEN + "Bridge zone MAX corner set!");
+                }
+                saveConfig();
+                loadBridgeZone();
+                break;
+
+            case "top":
+                showTopKillers(p);
+                break;
+
+            default:
+                sendHelp(p);
                 break;
         }
+
         return true;
+    }
+
+    private void showTopKillers(Player player) {
+        player.sendMessage(ChatColor.GOLD + "══════ Top Killers ══════");
+
+        List<Map.Entry<Player, Integer>> sortedKills = new ArrayList<>(playerKills.entrySet());
+        sortedKills.sort((a, b) -> b.getValue().compareTo(a.getValue()));
+
+        int rank = 1;
+        for (Map.Entry<Player, Integer> entry : sortedKills) {
+            String team = playerTeam.get(entry.getKey()) == Team.RED ? ChatColor.RED + "RED" : ChatColor.BLUE + "BLUE";
+            player.sendMessage(ChatColor.YELLOW + "#" + rank + " " + team + ChatColor.WHITE + " " + entry.getKey().getName() + ": " + ChatColor.GREEN + entry.getValue() + " kills");
+            rank++;
+            if (rank > 10) break;
+        }
+
+        if (sortedKills.isEmpty()) {
+            player.sendMessage(ChatColor.GRAY + "No kills yet!");
+        }
+
+        player.sendMessage(ChatColor.GOLD + "═══════════════════════════");
+    }
+
+    private void sendHelp(Player p) {
+        p.sendMessage(ChatColor.GOLD + "══════ Bridge Battle Help ══════");
+        p.sendMessage(ChatColor.YELLOW + "/bridge join" + ChatColor.WHITE + " - Join the game");
+        p.sendMessage(ChatColor.YELLOW + "/bridge leave" + ChatColor.WHITE + " - Leave the game");
+        p.sendMessage(ChatColor.YELLOW + "/bridge top" + ChatColor.WHITE + " - Show top killers");
+        p.sendMessage(ChatColor.YELLOW + "/b" + ChatColor.WHITE + " - Quick join");
+        if (p.hasPermission("bridge.admin")) {
+            p.sendMessage(ChatColor.YELLOW + "/bridge start" + ChatColor.WHITE + " - Force start");
+            p.sendMessage(ChatColor.YELLOW + "/bridge end" + ChatColor.WHITE + " - Force end");
+            p.sendMessage(ChatColor.YELLOW + "/bridge setspawn <lobby|red|blue>" + ChatColor.WHITE + " - Set spawns");
+            p.sendMessage(ChatColor.YELLOW + "/bridge setbridgezone <min|max>" + ChatColor.WHITE + " - Set bridge area");
+        }
+        p.sendMessage(ChatColor.GOLD + "═══════════════════════════════");
     }
 }
