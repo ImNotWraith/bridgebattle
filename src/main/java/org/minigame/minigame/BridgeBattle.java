@@ -103,6 +103,11 @@ public class BridgeBattle extends JavaPlugin {
         };
     }
 
+    public double getVoidLevel() {
+        // Returns the config value, or defaults to -65.0 if you forget to add it
+        return getConfig().getDouble("game.void-level", -65.0);
+    }
+
     // ==================== COMBAT & POINTS ====================
 
     public void addKill(Player player) {
@@ -404,10 +409,11 @@ public class BridgeBattle extends JavaPlugin {
             case "spawnshop" -> {
                 if (!p.hasPermission("bridge.admin")) return true;
                 Villager v = p.getWorld().spawn(p.getLocation(), Villager.class);
-                v.setCustomName("§6§lGAME SHOP");
+                v.setCustomName("§6§lBATTLE SHOP");
                 v.setCustomNameVisible(true);
                 v.setAI(false);
                 v.setInvulnerable(true);
+                v.setSilent(true);
                 p.sendMessage("§aShop spawned.");
             }
             case "removeshop" -> {
@@ -598,7 +604,6 @@ public class BridgeBattle extends JavaPlugin {
         holo.setVisible(false);
         holo.setMarker(true);
         holo.setGravity(false);
-        holo.setCustomName(name + " §f§lGENERATOR");
         holo.setCustomNameVisible(true);
         if (holo.getEquipment() != null) holo.getEquipment().setHelmet(new ItemStack(mat));
         genHolograms.put(loc, holo);

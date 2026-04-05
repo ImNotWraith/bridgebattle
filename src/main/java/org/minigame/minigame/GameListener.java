@@ -228,22 +228,35 @@ public class GameListener implements Listener {
     }
 
     @EventHandler
-    public void onPlayerMove(PlayerMoveEvent event) {
-        Player p = event.getPlayer();
-        BridgeBattle plugin = getPlugin();
+    public void onPlayerMove(PlayerMoveEvent e) {
+        Player p = e.getPlayer();
+        BridgeBattle plugin = BridgeBattle.getInstance();
 
-        // Void check during active game
-        if (plugin.getGameState() == BridgeBattle.GameState.ACTIVE && p.getLocation().getY() <= 0) {
-            BridgeBattle.Team team = plugin.getPlayerTeam(p);
+        // Check if they passed the configurable void limit
+        if (p.getLocation().getY() <= plugin.getVoidLevel()) {
 
-            if (team == BridgeBattle.Team.RED && plugin.getSpawn("red") != null) {
-                p.teleport(plugin.getSpawn("red"));
-                p.sendMessage(ChatColor.YELLOW + "You fell into the void! Respawned at base!");
-                p.playSound(p.getLocation(), Sound.ENTITY_ENDERMAN_TELEPORT, 1.0f, 1.0f);
-            } else if (team == BridgeBattle.Team.BLUE && plugin.getSpawn("blue") != null) {
-                p.teleport(plugin.getSpawn("blue"));
-                p.sendMessage(ChatColor.YELLOW + "You fell into the void! Respawned at base!");
-                p.playSound(p.getLocation(), Sound.ENTITY_ENDERMAN_TELEPORT, 1.0f, 1.0f);
+            if (plugin.getGameState() == BridgeBattle.GameState.ACTIVE) {
+                BridgeBattle.Team team = plugin.getPlayerTeam(p);
+                if (team != BridgeBattle.Team.NONE) {
+                    // Cancel momentum and teleport
+                    p.setFallDistance(0);
+                    p.setVelocity(new org.bukkit.util.Vector(0, 0, 0));
+                    p.teleport(plugin.getSpawn(team == BridgeBattle.Team.RED ? "red" : "blue"));
+
+                    // Reset stats and inventory
+                    p.setHealth(20.0);
+                    p.getInventory().clear();
+                    plugin.giveGameItems(p);
+                    p.sendMessage("§cYou fell into the void!");
+                }
+            } else {
+                // If they fall off the lobby while waiting
+                Location lobby = plugin.getSpawn("lobby");
+                if (lobby != null) {
+                    p.setFallDistance(0);
+                    p.setVelocity(new org.bukkit.util.Vector(0, 0, 0));
+                    p.teleport(lobby);
+                }
             }
         }
     }
